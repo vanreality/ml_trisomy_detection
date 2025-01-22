@@ -1,0 +1,7 @@
+work/
+results/
+scripts/
+data/
+.nextflow*
+.git*
+images/
