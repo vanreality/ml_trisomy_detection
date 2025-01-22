@@ -6,8 +6,8 @@ process EXTRACT_BAM {
     val(threshold)
 
     output:
-    tuple val(meta), path("*_target.bam"), emit: background_bam
-    tuple val(meta), path("*_background.bam"), emit: target_bam
+    tuple val(meta), path("*_target.bam"), emit: target_bam
+    tuple val(meta), path("*_background.bam"), emit: background_bam
 
     script:
     def args = task.ext.args ?: ''

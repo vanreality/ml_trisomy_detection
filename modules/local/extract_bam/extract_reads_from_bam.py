@@ -19,12 +19,12 @@ def extract_reads_from_bam(bam, txt, threshold, output):
 
         # Output a bam
         out_name = f'{output}_target.bam' if label == '1' else f'{output}_background.bam'
-        output = pysam.AlignmentFile(out_name, "wb", template=bam_file)
+        out_bam = pysam.AlignmentFile(out_name, "wb", template=bam_file)
         for read in extracted_reads:
-            output.write(read)
+            out_bam.write(read)
 
         bam_file.close()
-        output.close()
+        out_bam.close()
 
 @click.command()
 @click.option('--bam', required=True, type=click.Path(exists=True), help='Path to the bam file')
