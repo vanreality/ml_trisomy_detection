@@ -23,7 +23,6 @@ workflow {
     ch_target_bam = EXTRACT_BAM.out.target_bam
 
     SAMTOOLS_FAIDX([[:], file(params.reference)], [[:], []])
-    ch_fasta = SAMTOOLS_FAIDX.out.fa
     ch_fasta_index = SAMTOOLS_FAIDX.out.fai
 
     SAMTOOLS_INDEX_TARGET(ch_target_bam)
@@ -32,7 +31,7 @@ workflow {
 
     METHYLDACKEL_EXTRACT_TARGET(
         ch_target_bam, 
-        ch_fasta.map {meta, fasta -> fasta}, 
+        file(params.reference), 
         ch_fasta_index.map {meta, fasta_index -> fasta_index})
 
     ch_raw_bam = ch_samplesheet.map {meta, bam, txt -> tuple(meta, bam)}
@@ -42,6 +41,6 @@ workflow {
 
     METHYLDACKEL_EXTRACT_RAW(
         ch_raw_bam, 
-        ch_fasta.map {meta, fasta -> fasta}, 
+        file(params.reference), 
         ch_fasta_index.map {meta, fasta_index -> fasta_index})
 }
