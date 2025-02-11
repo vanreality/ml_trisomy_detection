@@ -32,7 +32,8 @@ workflow {
     METHYLDACKEL_EXTRACT_TARGET(
         ch_target_bam, 
         file(params.reference), 
-        ch_fasta_index.map {meta, fasta_index -> fasta_index})
+        ch_fasta_index.map {meta, fasta_index -> fasta_index}
+    )
 
     ch_raw_bam = ch_samplesheet.map {meta, bam, txt -> tuple(meta, bam)}
     SAMTOOLS_INDEX_RAW(ch_raw_bam)
@@ -42,5 +43,10 @@ workflow {
     METHYLDACKEL_EXTRACT_RAW(
         ch_raw_bam, 
         file(params.reference), 
-        ch_fasta_index.map {meta, fasta_index -> fasta_index})
+        ch_fasta_index.map {meta, fasta_index -> fasta_index}
+    )
+
+    // TODO: use customed script to extract methylation rate using proba as attention score
+
+    // TODO: merge methylation output to a matrix
 }
