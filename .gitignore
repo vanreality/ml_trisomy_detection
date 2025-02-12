@@ -5,3 +5,4 @@ data/
 .nextflow*
 .git*
 images/
+testing/

@@ -12,8 +12,10 @@ import re
 @click.command()
 @click.option('--input', '-i', type=click.Path(exists=True), required=True, help='Input TSV file path')
 @click.option('--output', '-o', default='heatmap.pdf', help='Output file path')
+@click.option('--format', '-f', default='pdf', help='Output format (pdf, png, jpg)')
+@click.option('--chr', '-c', default='chr16', help='Chromosome to select for specific plot')
 @click.option('--figsize', default=(10, 8), type=(float, float), help='Figure size (width, height)')
-def plot_heatmap(input, output, figsize):
+def plot_heatmap(input, output, format, chr, figsize):
     """
     Draw a heatmap from a TSV file containing methylation data.
     The TSV file should have columns: 'sample', 'label', and genomic regions.
@@ -35,17 +37,21 @@ def plot_heatmap(input, output, figsize):
     
     # Create chromosome categories
     chr_categories = pd.Series(chr_info)
-    chr16_cols = chr_categories[chr_categories == 'chr16'].index
-    other_cols = chr_categories[chr_categories != 'chr16'].index
+    selected_chr_cols = chr_categories[chr_categories == chr].index
+    other_cols = chr_categories[chr_categories != chr].index
     
-    # Reorder columns: chr16 followed by others
-    ordered_cols = list(chr16_cols) + list(other_cols)
+    # Reorder columns: selected chr followed by others
+    ordered_cols = list(selected_chr_cols) + list(other_cols)
     
     # Create column colors for chromosome information
     col_colors = pd.Series('other', index=ordered_cols)
-    col_colors[chr16_cols] = 'chr16'
-    col_palette = {'chr16': sns.color_palette('Set1')[0], 'other': sns.color_palette('Set1')[1]}
+    col_colors[selected_chr_cols] = chr
+    col_palette = {chr: sns.color_palette('Set1')[0], 'other': sns.color_palette('Set1')[1]}
     col_colors = col_colors.map(col_palette)
+    
+    # Ensure output has the correct format
+    if not output.endswith(f'.{format}'):
+        output = f"{output.rsplit('.', 1)[0]}.{format}"
     
     def create_plot(data_matrix, output_path):
         # Create row colors for labels
@@ -117,11 +123,13 @@ def plot_heatmap(input, output, figsize):
     # Create full plot
     create_plot(data_matrix, output)
     
-    # Create chr16-only plot
-    if len(chr16_cols) > 0:
-        chr16_matrix = data_matrix[chr16_cols]
-        chr16_output = output.rsplit('.', 1)[0] + '_chr16.pdf'
-        create_plot(chr16_matrix, chr16_output)
+    # Create chromosome-specific plot
+    if len(selected_chr_cols) > 0:
+        chr_matrix = data_matrix[selected_chr_cols]
+        chr_output = f"{output.rsplit('.', 1)[0]}_{chr}.{format}"
+        create_plot(chr_matrix, chr_output)
+    else:
+        click.echo(f"Warning: No regions found for chromosome {chr}")
 
 if __name__ == '__main__':
     plot_heatmap()
