@@ -14,6 +14,6 @@ process EXTRACT_BAM {
     def script = "${projectDir}/modules/local/extract_bam/extract_reads_from_bam.py"
     def prefix = task.ext.prefix ?: "$meta.id"
     """
-    python3 ${script} --bam ${bam} --txt ${txt} --threshold ${threshold} --output ${prefix}
+    python3 ${script} ${args} --bam ${bam} --txt ${txt} --threshold ${threshold} --output ${prefix}
     """
 }
