@@ -1,4 +1,5 @@
 import pandas as pd
+import numpy as np
 import pysam
 import click
 from Bio import SeqIO
@@ -8,18 +9,22 @@ def get_cpg_sites(bed, fasta):
     cpg_sites = []
     fasta_sequences = SeqIO.to_dict(SeqIO.parse(fasta, "fasta"))
     
-    bed_df = pd.read_csv(bed, sep='\t', header=None, names=['chr', 'start', 'end'])
+    bed_df = pd.read_csv(bed, sep='\t', header=None, usecols=[0, 1, 2], names=['chr', 'start', 'end'])
     for _, row in bed_df.iterrows():
         chr_seq = str(fasta_sequences[row['chr']].seq)
-        for i in range(row['start'], row['end'] - 1):  # -1 to ensure CG pair
-            if chr_seq[i:i+2] == "CG":
-                cpg_sites.append([row['chr'], i, i + 2])
+        for i in range(row['start'], row['end']):
+            if chr_seq[i:i+2] == "CG" or chr_seq[i:i+2] == "cg":
+                cpg_sites.append([row['chr'], i, i + 2, row['chr'], row['start'], row['end']])
     
-    return pd.DataFrame(cpg_sites, columns=['chr', 'start', 'end'])
+    return pd.DataFrame(cpg_sites, columns=['chr', 'start', 'end', 'chr_dmr', 'start_dmr', 'end_dmr'])
 
 def get_methylation_status(bam, txt, cpg_site_df):
-    """Extracts read methylation status based on CIGAR and reference genome."""
+    """Extracts read methylation status based on CIGAR and txt file."""
     txt_df = pd.read_csv(txt, sep='\t')
+    # Add 'chr' prefix if not present
+    if not txt_df['chr'].astype(str).str.contains('chr').all():
+        txt_df['chr'] = 'chr' + txt_df['chr'].astype(str)
+    
     read_names = set(txt_df['name'].drop_duplicates())
     bam_file = pysam.AlignmentFile(bam, "rb")
     
@@ -29,28 +34,79 @@ def get_methylation_status(bam, txt, cpg_site_df):
         if read_name not in read_names:
             continue
         
-        seq = read.query_sequence
-        chrom = read.reference_name
-        start = read.reference_start
-        prob0, prob1 = txt_df.loc[txt_df['name'] == read_name, ['prob_class_0', 'prob_class_1']].values[0]
+        cigar_tuples = read.cigartuples
         
-        for _, site in cpg_site_df[cpg_site_df['chr'] == chrom].iterrows():
-            if start <= site['start'] < read.reference_end:
-                rel_pos = site['start'] - start
-                if 0 <= rel_pos < len(seq):
-                    status = 1 if seq[rel_pos] == 'M' else 0
-                    cpg_prob_list.append([chrom, site['start'], site['end'], read_name, status, prob0, prob1])
-    
+        # Find corresponding row in txt_df
+        read_data = txt_df[
+            (txt_df['name'] == read_name) & 
+            (txt_df['chr'] == read.reference_name) & 
+            (txt_df['start'] == read.reference_start)
+        ]
+        
+        if read_data.empty:
+            continue
+            
+        prob1 = read_data['prob_class_1'].values[0]
+        sequence = read_data['text'].values[0]
+        chrom = read_data['chr'].values[0]
+        start = read_data['start'].values[0]
+        end = read_data['end'].values[0]
+        
+        # Find CpG sites in the read mapping region
+        cpg_sites = cpg_site_df[
+            (cpg_site_df['chr'] == chrom) & 
+            (cpg_site_df['start'] >= start) & 
+            (cpg_site_df['end'] <= end + 1)
+        ]
+        
+        # Convert CIGAR to reference positions
+        ref_pos = start
+        seq_pos = 0
+        for op, length in cigar_tuples:
+            # Match/mismatch or sequence match
+            if op in [0, 7, 8]:
+                for cpg in cpg_sites.itertuples():
+                    if cpg.start >= ref_pos and cpg.start < ref_pos + length:
+                        # Calculate position in sequence
+                        seq_offset = cpg.start - ref_pos
+                        seq_index = seq_pos + seq_offset
+                        
+                        # Check methylation status
+                        if sequence[seq_index] == 'M':
+                            status = 1
+                        elif sequence[seq_index] == 'C':
+                            status = 0
+                        else:
+                            status = np.nan
+                            
+                        cpg_prob_list.append([
+                            cpg.chr,
+                            cpg.start,
+                            cpg.end,
+                            read_name,
+                            status,
+                            prob1
+                        ])
+                
+                ref_pos += length
+                seq_pos += length
+            # Deletion
+            elif op == 2:
+                ref_pos += length
+            # Insertion or soft clip
+            elif op in [1, 4]:
+                seq_pos += length
+   
     bam_file.close()
-    return pd.DataFrame(cpg_prob_list, columns=['chr', 'start', 'end', 'name', 'status', 'prob_class_0', 'prob_class_1'])
+    return pd.DataFrame(cpg_prob_list, columns=['chr', 'start', 'end', 'name', 'status', 'prob_class_1']).dropna()
 
 def compute_methylation_rate(cpg_site_df, cpg_site_prob_df):
     """Calculates methylation rate for each CpG site."""
     rates = cpg_site_prob_df.groupby(['chr', 'start', 'end']).apply(
-        lambda x: (x['prob_class_1'] * x['status']).sum() / x['prob_class_1'].sum() * 100 if x['prob_class_1'].sum() > 0 else 0
-    ).reset_index(name='methylation_rate')
+        lambda x: (x['prob_class_1'] * x['status']).sum() / x['prob_class_1'].sum() * 100 if x['prob_class_1'].sum() > 0 else np.nan
+    ).dropna().reset_index(name='methylation_rate')
     
-    return cpg_site_df.merge(rates, on=['chr', 'start', 'end'], how='left').fillna({'methylation_rate': 0})
+    return rates
 
 @click.command()
 @click.option('--bam', required=True, type=click.Path(exists=True), help='Path to the bam file')
