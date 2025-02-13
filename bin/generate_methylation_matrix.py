@@ -6,7 +6,7 @@ import click
 def read_bedgraph(bedgraph_file_path):
     """Reads a bedgraph file into a DataFrame, skipping the first line start with track."""
     try:
-        return pd.read_csv(bedgraph_file_path, sep="\t", header=None, comment='track', usecols=[0, 1, 2, 3],
+        return pd.read_csv(bedgraph_file_path, sep="\t", header=None, comment='t', usecols=[0, 1, 2, 3],
                           names=['chr', 'start', 'end', 'meth_rate'])
     except ValueError as e:
         raise ValueError(f"Error reading bedGraph file {bedgraph_file_path}. "

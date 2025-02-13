@@ -163,7 +163,7 @@ def main(bam, txt, bed, fasta, output, ncpus):
     cpg_site_prob_df = get_methylation_status(bam, txt, cpg_site_df, ncpus)
     cpg_site_df = compute_methylation_rate(cpg_site_df, cpg_site_prob_df)
     
-    cpg_site_df.to_csv(f"{output}_CpG.bedGraph", index=False)
+    cpg_site_df.to_csv(f"{output}_CpG.bedGraph", index=False, sep='\t')
     cpg_site_prob_df.to_csv(f"{output}_cpg_prob.csv", index=False)
 
 if __name__ == '__main__':

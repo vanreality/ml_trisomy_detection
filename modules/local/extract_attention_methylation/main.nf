@@ -13,7 +13,7 @@ process EXTRACT_ATTENTION_METHYLATION {
 
     script:
     def args = task.ext.args ?: ''
-    def script = "${projectDir}/modules/local/extract_attention_methylation/extract_attetion_methylation.py"
+    def script = "${workflow.projectDir}/bin/extract_attetion_methylation.py"
     def prefix = task.ext.prefix ?: "${meta.id}"
     """
     python3 ${script} \\

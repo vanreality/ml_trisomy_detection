@@ -11,7 +11,7 @@ process PLOT_HEATMAP {
     
     script:
     def args = task.ext.args ?: ''
-    def script = "${projectDir}/modules/local/plot_heatmap/plot_heatmap.py"
+    def script = "${workflow.projectDir}/bin/plot_heatmap.py"
     def prefix = task.ext.prefix ?: "${meta.id}"
     """
     python3 ${script} \\

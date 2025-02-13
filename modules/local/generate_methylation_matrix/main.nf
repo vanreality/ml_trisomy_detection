@@ -11,7 +11,7 @@ process GENERATE_METHYLATION_MATRIX {
     
     script:
     def args = task.ext.args ?: ''
-    def script = "${projectDir}/modules/local/generate_methylation_matrix/generate_methylation_matrix.py"
+    def script = "${workflow.projectDir}/bin/generate_methylation_matrix.py"
     def prefix = task.ext.prefix ?: "${meta.id}"
     """
     python3 ${script} \\

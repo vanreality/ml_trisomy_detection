@@ -11,7 +11,7 @@ process EXTRACT_BAM {
 
     script:
     def args = task.ext.args ?: ''
-    def script = "${projectDir}/modules/local/extract_bam/extract_reads_from_bam.py"
+    def script = "${workflow.projectDir}/bin/extract_reads_from_bam.py"
     def prefix = task.ext.prefix ?: "$meta.id"
     """
     python3 ${script} ${args} --bam ${bam} --txt ${txt} --threshold ${threshold} --output ${prefix}
