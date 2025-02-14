@@ -143,7 +143,7 @@ def get_methylation_status(bam, txt, cpg_site_df, ncpus=None):
         columns=['chr', 'start', 'end', 'name', 'status', 'prob_class_1']
     ).dropna()
 
-def compute_methylation_rate(cpg_site_df, cpg_site_prob_df):
+def compute_methylation_rate(cpg_site_prob_df):
     """Calculates methylation rate for each CpG site."""
     rates = cpg_site_prob_df.groupby(['chr', 'start', 'end']).apply(
         lambda x: (x['prob_class_1'] * x['status']).sum() / x['prob_class_1'].sum() * 100 if x['prob_class_1'].sum() > 0 else np.nan
@@ -161,7 +161,7 @@ def compute_methylation_rate(cpg_site_df, cpg_site_prob_df):
 def main(bam, txt, bed, fasta, output, ncpus):
     cpg_site_df = get_cpg_sites(bed, fasta)
     cpg_site_prob_df = get_methylation_status(bam, txt, cpg_site_df, ncpus)
-    cpg_site_df = compute_methylation_rate(cpg_site_df, cpg_site_prob_df)
+    cpg_site_df = compute_methylation_rate(cpg_site_prob_df)
     
     cpg_site_df.to_csv(f"{output}_CpG.bedGraph", index=False, sep='\t')
     cpg_site_prob_df.to_csv(f"{output}_cpg_prob.csv", index=False)
