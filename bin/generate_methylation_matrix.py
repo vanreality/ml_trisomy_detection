@@ -1,6 +1,6 @@
 import pandas as pd
 import numpy as np
-import os
+import sys
 import click
 from multiprocessing import Pool
 from functools import partial
@@ -22,6 +22,10 @@ def read_dmr_list(dmr_file):
 
 def extract_cpgs_in_dmr(bedgraph_df, dmr_df):
     """Filters CpG sites in bedgraph_df that fall within the regions defined in dmr_df using vectorized operations."""
+    # Ensure chromosome names are in the same format
+    bedgraph_df['chr'] = bedgraph_df['chr'].astype(str)
+    dmr_df['chr'] = dmr_df['chr'].astype(str)
+    
     # Create IntervalIndex for the DMR regions
     dmr_intervals = pd.IntervalIndex.from_arrays(
         dmr_df['start'],
@@ -30,8 +34,10 @@ def extract_cpgs_in_dmr(bedgraph_df, dmr_df):
     )
     
     results = []
-    # Process each chromosome separately to reduce memory usage
-    for chrom in bedgraph_df['chr'].unique():
+    # Process each chromosome that appears in both bedgraph and dmr files
+    common_chroms = set(bedgraph_df['chr'].unique()) & set(dmr_df['chr'].unique())
+    
+    for chrom in common_chroms:
         # Filter bedgraph and dmr data for current chromosome
         bed_chr = bedgraph_df[bedgraph_df['chr'] == chrom]
         dmr_chr = dmr_df[dmr_df['chr'] == chrom]
@@ -76,18 +82,28 @@ def process_single_bedgraph(bedgraph_info, dmr_list):
     sample_name = bedgraph_info['sample']
     bedgraph_file_path = bedgraph_info['bedgraph_file_path']
     
-    # Read the bedgraph file and extract CpG sites within DMRs
-    cpgs_in_dmr = extract_cpgs_in_dmr(read_bedgraph(bedgraph_file_path), dmr_list)
-    
-    # Process CpG level data
-    meth_cpgs = cpgs_in_dmr[['chr', 'start', 'end', 'meth_rate']]
-    meth_cpgs.columns = ['chr', 'start', 'end', sample_name]
-    
-    # Process DMR level data
-    meth_dmrs = pd.DataFrame(cpgs_in_dmr.groupby(['chr_dmr', 'start_dmr', 'end_dmr'])['meth_rate'].mean().reset_index())
-    meth_dmrs.columns = ['chr', 'start', 'end', sample_name]
-    
-    return meth_cpgs, meth_dmrs
+    try:
+        # Read the bedgraph file and extract CpG sites within DMRs
+        bedgraph_df = read_bedgraph(bedgraph_file_path)
+        cpgs_in_dmr = extract_cpgs_in_dmr(bedgraph_df, dmr_list)
+        
+        # Process CpG level data
+        meth_cpgs = cpgs_in_dmr[['chr', 'start', 'end', 'meth_rate']]
+        meth_cpgs.columns = ['chr', 'start', 'end', sample_name]
+        
+        # Process DMR level data - calculate mean methylation for each DMR
+        meth_dmrs = cpgs_in_dmr.groupby(['chr_dmr', 'start_dmr', 'end_dmr'])['meth_rate'].agg(['mean', 'count']).reset_index()
+        # Only keep DMRs with sufficient CpG coverage (optional, adjust threshold as needed)
+        meth_dmrs = meth_dmrs[meth_dmrs['count'] > 0]
+        meth_dmrs = meth_dmrs[['chr_dmr', 'start_dmr', 'end_dmr', 'mean']]
+        meth_dmrs.columns = ['chr', 'start', 'end', sample_name]
+        
+        return meth_cpgs, meth_dmrs
+        
+    except Exception as e:
+        print(f"Error processing {bedgraph_file_path}: {str(e)}")
+        # Stop execution if there's an error
+        sys.exit(1)
 
 def process_bedgraph_files(meta, dmr_list, ncpus):
     """Processes bedgraph files in parallel and merges results."""
