@@ -1,10 +1,16 @@
-include { EXTRACT_BAM } from './modules/local/extract_bam/main'
+// Import required modules with logical grouping
+// Core samtools modules
 include { SAMTOOLS_FAIDX } from './modules/nf-core/samtools/faidx/main'
 include { SAMTOOLS_INDEX } from './modules/nf-core/samtools/index/main'
 include { SAMTOOLS_INDEX as SAMTOOLS_INDEX_RAW } from './modules/nf-core/samtools/index/main'
 include { SAMTOOLS_INDEX as SAMTOOLS_INDEX_TARGET } from './modules/nf-core/samtools/index/main'
+
+// Methylation analysis modules
 include { METHYLDACKEL_EXTRACT as METHYLDACKEL_EXTRACT_RAW } from './modules/nf-core/methyldackel/extract/main'
 include { METHYLDACKEL_EXTRACT as METHYLDACKEL_EXTRACT_TARGET } from './modules/nf-core/methyldackel/extract/main'
+
+// Custom analysis modules
+include { EXTRACT_BAM } from './modules/local/extract_bam/main'
 include { EXTRACT_ATTENTION_METHYLATION } from './modules/local/extract_attention_methylation/main'
 include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_TARGET } from './modules/local/generate_methylation_matrix/main'
 include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_RAW } from './modules/local/generate_methylation_matrix/main'
@@ -14,6 +20,8 @@ include { PLOT_HEATMAP as PLOT_HEATMAP_RAW } from './modules/local/plot_heatmap/
 include { PLOT_HEATMAP as PLOT_HEATMAP_ATTENTION } from './modules/local/plot_heatmap/main'
 
 workflow {
+    // 1. Input processing
+    // Read and parse input CSV file
     Channel
         .fromPath(params.input)
         .splitCsv(header: true)
@@ -23,15 +31,22 @@ workflow {
         }
         .set { ch_samplesheet }
 
+    // 2. Initial BAM processing
+    // Index input BAM files
     SAMTOOLS_INDEX(ch_samplesheet.map {meta, bam, txt -> tuple(meta, bam)})
     ch_raw_samplesheet = ch_samplesheet.join(SAMTOOLS_INDEX.out.bai)
 
+    // Extract BAM regions based on threshold
     EXTRACT_BAM(ch_raw_samplesheet, params.threshold)
     ch_target_bam = EXTRACT_BAM.out.target_bam
 
+    // 3. Reference genome preparation
+    // Index reference genome
     SAMTOOLS_FAIDX([[:], file(params.reference)], [[:], []])
     ch_fasta_index = SAMTOOLS_FAIDX.out.fai
 
+    // 4. Target BAM analysis
+    // Process extracted target regions
     SAMTOOLS_INDEX_TARGET(ch_target_bam)
     ch_target_bam_bai = SAMTOOLS_INDEX_TARGET.out.bai
     ch_target_bam = ch_target_bam.join(ch_target_bam_bai)
@@ -42,6 +57,8 @@ workflow {
         ch_fasta_index.map {meta, fasta_index -> fasta_index}
     )
 
+    // 5. Raw BAM analysis
+    // Process original BAM files
     ch_raw_bam = ch_samplesheet.map {meta, bam, txt -> tuple(meta, bam)}
     SAMTOOLS_INDEX_RAW(ch_raw_bam)
     ch_raw_bam_bai = SAMTOOLS_INDEX_RAW.out.bai
@@ -53,6 +70,7 @@ workflow {
         ch_fasta_index.map {meta, fasta_index -> fasta_index}
     )
 
+    // 6. Attention methylation analysis
     EXTRACT_ATTENTION_METHYLATION(
         ch_raw_samplesheet,
         file(params.dmr_bed),
@@ -60,58 +78,33 @@ workflow {
         ch_fasta_index.map {meta, fasta_index -> fasta_index}
     )
 
-    // Collect bedGraph files and create meta CSV for each type
-    METHYLDACKEL_EXTRACT_TARGET.out.bedgraph
-        .map { meta, bedgraph -> 
-            [meta.id, meta.label, bedgraph.toString()].join(',')
-        }
-        .collectFile(
-            name: 'target_meta.csv',
-            newLine: true,
-            seed: 'sample,label,bedgraph_file_path'
-        )
-        .map { csv -> [[ id: 'target' ], csv] }
-        .set { ch_target_meta }
+    // 7. Metadata preparation
+    // Create meta CSV files for each analysis type
+    def create_meta_csv = { stream, prefix ->
+        stream
+            .map { meta, bedgraph -> 
+                [meta.id, meta.label, bedgraph.toString()].join(',')
+            }
+            .collectFile(
+                name: "${prefix}_meta.csv",
+                newLine: true,
+                seed: 'sample,label,bedgraph_file_path'
+            )
+            .map { csv -> [[ id: prefix ], csv] }
+    }
 
-    METHYLDACKEL_EXTRACT_RAW.out.bedgraph
-        .map { meta, bedgraph -> 
-            [meta.id, meta.label, bedgraph.toString()].join(',')
-        }
-        .collectFile(
-            name: 'raw_meta.csv',
-            newLine: true,
-            seed: 'sample,label,bedgraph_file_path'
-        )
-        .map { csv -> [[ id: 'raw' ], csv] }
-        .set { ch_raw_meta }
+    ch_target_meta = create_meta_csv(METHYLDACKEL_EXTRACT_TARGET.out.bedgraph, 'target')
+    ch_raw_meta = create_meta_csv(METHYLDACKEL_EXTRACT_RAW.out.bedgraph, 'raw')
+    ch_attention_meta = create_meta_csv(EXTRACT_ATTENTION_METHYLATION.out.cpg_sites, 'attention')
 
-    EXTRACT_ATTENTION_METHYLATION.out.cpg_sites
-        .map { meta, bedgraph -> 
-            [meta.id, meta.label, bedgraph.toString()].join(',')
-        }
-        .collectFile(
-            name: 'attention_meta.csv',
-            newLine: true,
-            seed: 'sample,label,bedgraph_file_path'
-        )
-        .map { csv -> [[ id: 'attention' ], csv] }
-        .set { ch_attention_meta }
+    // 8. Matrix generation
+    // Generate methylation matrices for each analysis type
+    GENERATE_METHYLATION_MATRIX_TARGET(ch_target_meta, file(params.dmr_bed))
+    GENERATE_METHYLATION_MATRIX_RAW(ch_raw_meta, file(params.dmr_bed))
+    GENERATE_METHYLATION_MATRIX_ATTENTION(ch_attention_meta, file(params.dmr_bed))
 
-    // Generate methylation matrices
-    GENERATE_METHYLATION_MATRIX_TARGET(
-        ch_target_meta,
-        file(params.dmr_bed)
-    )
-    GENERATE_METHYLATION_MATRIX_RAW(
-        ch_raw_meta,
-        file(params.dmr_bed)
-    )
-    GENERATE_METHYLATION_MATRIX_ATTENTION(
-        ch_attention_meta,
-        file(params.dmr_bed)
-    )
-
-    // Plot heatmaps for each matrix type
+    // 9. Visualization
+    // Generate heatmaps for each matrix type
     PLOT_HEATMAP_TARGET(
         GENERATE_METHYLATION_MATRIX_TARGET.out.cpgs_matrix,
         params.chr,
