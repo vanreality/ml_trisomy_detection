@@ -19,6 +19,14 @@ include { PLOT_HEATMAP as PLOT_HEATMAP_TARGET } from './modules/local/plot_heatm
 include { PLOT_HEATMAP as PLOT_HEATMAP_RAW } from './modules/local/plot_heatmap/main'
 include { PLOT_HEATMAP as PLOT_HEATMAP_ATTENTION } from './modules/local/plot_heatmap/main'
 
+// Add aliases for DMR heatmap plotting
+include { PLOT_HEATMAP as PLOT_HEATMAP_TARGET_CPGS } from './modules/local/plot_heatmap/main'
+include { PLOT_HEATMAP as PLOT_HEATMAP_RAW_CPGS } from './modules/local/plot_heatmap/main'
+include { PLOT_HEATMAP as PLOT_HEATMAP_ATTENTION_CPGS } from './modules/local/plot_heatmap/main'
+include { PLOT_HEATMAP as PLOT_HEATMAP_TARGET_DMRS } from './modules/local/plot_heatmap/main'
+include { PLOT_HEATMAP as PLOT_HEATMAP_RAW_DMRS } from './modules/local/plot_heatmap/main'
+include { PLOT_HEATMAP as PLOT_HEATMAP_ATTENTION_DMRS } from './modules/local/plot_heatmap/main'
+
 workflow {
     // 1. Input processing
     // Read and parse input CSV file
@@ -104,19 +112,36 @@ workflow {
     GENERATE_METHYLATION_MATRIX_ATTENTION(ch_attention_meta, file(params.dmr_bed))
 
     // 9. Visualization
-    // Generate heatmaps for each matrix type
-    PLOT_HEATMAP_TARGET(
+    // Generate heatmaps for CpG matrices
+    PLOT_HEATMAP_TARGET_CPGS(
         GENERATE_METHYLATION_MATRIX_TARGET.out.cpgs_matrix,
         params.chr,
         params.format
     )
-    PLOT_HEATMAP_RAW(
+    PLOT_HEATMAP_RAW_CPGS(
         GENERATE_METHYLATION_MATRIX_RAW.out.cpgs_matrix,
         params.chr,
         params.format
     )
-    PLOT_HEATMAP_ATTENTION(
+    PLOT_HEATMAP_ATTENTION_CPGS(
         GENERATE_METHYLATION_MATRIX_ATTENTION.out.cpgs_matrix,
+        params.chr,
+        params.format
+    )
+
+    // Generate heatmaps for DMR matrices
+    PLOT_HEATMAP_TARGET_DMRS(
+        GENERATE_METHYLATION_MATRIX_TARGET.out.dmrs_matrix,
+        params.chr,
+        params.format
+    )
+    PLOT_HEATMAP_RAW_DMRS(
+        GENERATE_METHYLATION_MATRIX_RAW.out.dmrs_matrix,
+        params.chr,
+        params.format
+    )
+    PLOT_HEATMAP_ATTENTION_DMRS(
+        GENERATE_METHYLATION_MATRIX_ATTENTION.out.dmrs_matrix,
         params.chr,
         params.format
     )

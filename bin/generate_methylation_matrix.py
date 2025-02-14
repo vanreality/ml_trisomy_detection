@@ -121,11 +121,11 @@ def process_samples(meta, dmr_list, prefix, ncpus):
     all_cpgs_df, all_dmrs_df = process_bedgraph_files(meta, dmr_list, ncpus)
     
     # Create index for both dataframes
-    all_cpgs_df['index'] = all_cpgs_df['chr'].astype(str) + ':' + all_cpgs_df['start'].astype(str) + '-' + all_cpgs_df['end'].astype(str)
+    all_cpgs_df['index'] = all_cpgs_df['chr'].astype(str) + ':' + all_cpgs_df['start'].astype(int).astype(str) + '-' + all_cpgs_df['end'].astype(int).astype(str)
     all_cpgs_df = all_cpgs_df.set_index('index')
     all_cpgs_df = all_cpgs_df.drop(columns=['chr', 'start', 'end'])
 
-    all_dmrs_df['index'] = all_dmrs_df['chr'].astype(str) + ':' + all_dmrs_df['start'].astype(str) + '-' + all_dmrs_df['end'].astype(str)
+    all_dmrs_df['index'] = all_dmrs_df['chr'].astype(str) + ':' + all_dmrs_df['start'].astype(int).astype(str) + '-' + all_dmrs_df['end'].astype(int).astype(str)
     all_dmrs_df = all_dmrs_df.set_index('index')
     all_dmrs_df = all_dmrs_df.drop(columns=['chr', 'start', 'end'])
 
