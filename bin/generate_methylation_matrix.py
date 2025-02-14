@@ -26,14 +26,8 @@ def extract_cpgs_in_dmr(bedgraph_df, dmr_df):
     bedgraph_df['chr'] = bedgraph_df['chr'].astype(str)
     dmr_df['chr'] = dmr_df['chr'].astype(str)
     
-    # Create IntervalIndex for the DMR regions
-    dmr_intervals = pd.IntervalIndex.from_arrays(
-        dmr_df['start'],
-        dmr_df['end'],
-        closed='both'
-    )
-    
     results = []
+
     # Process each chromosome that appears in both bedgraph and dmr files
     common_chroms = set(bedgraph_df['chr'].unique()) & set(dmr_df['chr'].unique())
     
@@ -47,8 +41,8 @@ def extract_cpgs_in_dmr(bedgraph_df, dmr_df):
             
         # Create intervals for current chromosome
         chr_intervals = pd.IntervalIndex.from_arrays(
-            dmr_chr['start'],
-            dmr_chr['end'],
+            dmr_chr['start'] + 1,
+            dmr_chr['end'] + 1,
             closed='both'
         )
         
@@ -62,7 +56,7 @@ def extract_cpgs_in_dmr(bedgraph_df, dmr_df):
             continue
             
         # Create result DataFrame for matched CpGs
-        matched_cpgs = bed_chr[valid_matches].copy()
+        matched_cpgs = bed_chr[valid_matches].copy().reset_index(drop=True)
         matched_dmrs = dmr_chr.iloc[interval_matches[valid_matches]].reset_index(drop=True)
         
         # Add DMR information
