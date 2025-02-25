@@ -6,6 +6,7 @@ from Bio import SeqIO
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing
 from functools import partial
+import sys
 
 def get_cpg_sites(bed, fasta):
     """Extracts CpG sites from the DMR regions in the reference genome."""
@@ -68,11 +69,17 @@ def process_chunk(chunk_info, txt_df_indexed, cpg_site_df):
                             seq_offset = cpg.start - ref_pos
                             seq_index = seq_pos + seq_offset
                             
-                            if sequence[seq_index] == 'M':
-                                status = 1
-                            elif sequence[seq_index] == 'C':
-                                status = 0
-                            else:
+                            try:
+                                if sequence[seq_index] == 'M':
+                                    status = 1
+                                    # status = 0.01
+                                elif sequence[seq_index] == 'C':
+                                    status = 0
+                                    # status = 0.99 # Enhance the PL signal in PL-hypo-DMRs
+                                else:
+                                    continue
+                            except IndexError:
+                                print(f"IndexError: string index out of range for read {read_name}")
                                 continue
                                 
                             cpg_prob_list.append([
