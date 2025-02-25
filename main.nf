@@ -107,9 +107,24 @@ workflow {
             .map { csv -> [[ id: prefix ], csv] }
     }
 
+    def create_attention_meta_csv = { stream ->
+        stream
+            .map { meta, bedgraph, prob_file -> 
+                [meta.id, meta.label, bedgraph.toString(), prob_file.toString()].join(',')
+            }
+            .collectFile(
+                name: "attention_meta.csv",
+                newLine: true,
+                seed: 'sample,label,bedgraph_file_path,prob_file_path'
+            )
+            .map { csv -> [[ id: 'attention' ], csv] }
+    }
+
     ch_target_meta = params.threshold ? create_meta_csv(METHYLDACKEL_EXTRACT_TARGET.out.bedgraph, 'target') : Channel.empty()
     ch_raw_meta = create_meta_csv(METHYLDACKEL_EXTRACT_RAW.out.bedgraph, 'raw')
-    ch_attention_meta = create_meta_csv(EXTRACT_ATTENTION_METHYLATION.out.cpg_sites, 'attention')
+    ch_attention_meta = create_attention_meta_csv(
+        EXTRACT_ATTENTION_METHYLATION.out.cpg_sites.join(EXTRACT_ATTENTION_METHYLATION.out.cpg_prob)
+    )
 
     // 8. Matrix generation
     // Generate methylation matrices for each analysis type
