@@ -156,7 +156,7 @@ def process_single_sample(sample_info, dmr_list):
             
             # Calculate weighted methylation rate for each DMR
             dmr_stats = probs_in_dmr.groupby(['chr_dmr', 'start_dmr', 'end_dmr']).agg({
-                'prob_class_1': lambda x: np.sum(x * probs_in_dmr.loc[x.index, 'status']) / np.sum(x)
+                'prob_class_1': lambda x: np.sum(x * probs_in_dmr.loc[x.index, 'status']) / np.sum(x) * 100
             }).reset_index()
             
             meth_dmrs = dmr_stats[['chr_dmr', 'start_dmr', 'end_dmr', 'prob_class_1']]
@@ -170,7 +170,7 @@ def process_single_sample(sample_info, dmr_list):
                     'meth_count': 'sum',
                     'unmeth_count': 'sum'
                 }).reset_index()
-                dmr_stats[sample_name] = dmr_stats['meth_count'] / (dmr_stats['meth_count'] + dmr_stats['unmeth_count'])
+                dmr_stats[sample_name] = dmr_stats['meth_count'] / (dmr_stats['meth_count'] + dmr_stats['unmeth_count']) * 100
                 meth_dmrs = dmr_stats[['chr_dmr', 'start_dmr', 'end_dmr', sample_name]]
             else:
                 # Old way using average meth_rate
