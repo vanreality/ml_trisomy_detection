@@ -5,8 +5,8 @@ from pathlib import Path
 
 
 @click.command()
-@click.argument('--parquet-file-path', type=click.Path(exists=True))
-@click.argument('--output-dir', type=click.Path(), default='.')
+@click.option('--parquet-file-path', type=click.Path(exists=True))
+@click.option('--output-dir', type=click.Path(), default='.')
 def split_parquet_by_sample(parquet_file_path, output_dir):
     """
     Read a parquet file and split it by sample.

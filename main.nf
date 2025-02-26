@@ -37,8 +37,8 @@ workflow {
         )
         
         // Read the generated samplesheet
-        Channel
-            .fromPath(SPLIT_PARQUET_BY_SAMPLE.out.samplesheet.map { meta, samplesheet -> samplesheet })
+        SPLIT_PARQUET_BY_SAMPLE.out.samplesheet
+            .map { meta, samplesheet -> samplesheet }
             .splitCsv(header: true)
             .map { row -> 
                 def meta = [id: row.sample, label: row.label]
