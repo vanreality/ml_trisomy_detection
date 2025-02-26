@@ -10,14 +10,13 @@ include { METHYLDACKEL_EXTRACT as METHYLDACKEL_EXTRACT_RAW } from './modules/nf-
 include { METHYLDACKEL_EXTRACT as METHYLDACKEL_EXTRACT_TARGET } from './modules/nf-core/methyldackel/extract/main'
 
 // Custom analysis modules
-include { EXTRACT_BAM } from './modules/local/extract_bam/main'
-include { EXTRACT_ATTENTION_METHYLATION } from './modules/local/extract_attention_methylation/main'
+include { SPLIT_PARQUET_BY_SAMPLE } from './modules/local/split_parquet_by_sample/main'
+include { EXTRACT_READS_FROM_BAM } from './modules/local/extract_reads_from_bam/main'
+include { CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED } from './modules/local/calculate_prob_weighted_methylation_from_bed/main'
+include { CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET } from './modules/local/calculate_prob_weighted_methylation_from_parquet/main'
 include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_TARGET } from './modules/local/generate_methylation_matrix/main'
 include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_RAW } from './modules/local/generate_methylation_matrix/main'
 include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_ATTENTION } from './modules/local/generate_methylation_matrix/main'
-include { PLOT_HEATMAP as PLOT_HEATMAP_TARGET } from './modules/local/plot_heatmap/main'
-include { PLOT_HEATMAP as PLOT_HEATMAP_RAW } from './modules/local/plot_heatmap/main'
-include { PLOT_HEATMAP as PLOT_HEATMAP_ATTENTION } from './modules/local/plot_heatmap/main'
 
 // Add aliases for DMR heatmap plotting
 include { PLOT_HEATMAP as PLOT_HEATMAP_TARGET_CPGS } from './modules/local/plot_heatmap/main'
@@ -29,9 +28,28 @@ include { PLOT_HEATMAP as PLOT_HEATMAP_ATTENTION_DMRS } from './modules/local/pl
 
 workflow {
     // 1. Input processing
-    // Read and parse input CSV file
+    // Determine input source (samplesheet or parquet)
+    if (params.input_parquet) {
+        // Process parquet input and create samplesheet
+        SPLIT_PARQUET_BY_SAMPLE(
+            [[ id: 'samples' ], file(params.input_parquet)],
+            file("${workflow.projectDir}/bin/split_parquet_by_sample.py")
+        )
+        
+        // Read the generated samplesheet
+        Channel
+            .fromPath(SPLIT_PARQUET_BY_SAMPLE.out.samplesheet.map { meta, samplesheet -> samplesheet })
+            .splitCsv(header: true)
+            .map { row -> 
+                def meta = [id: row.sample, label: row.label]
+                return [meta, file(row.parquet)]
+            }
+            .set { ch_parquet_samplesheet }
+    }
+    
+    // Read and parse input CSV file (original behavior)
     Channel
-        .fromPath(params.input)
+        .fromPath(params.input_samplesheet)
         .splitCsv(header: true)
         .map { row -> 
             def meta = [id: row.sample, label: row.label]
@@ -47,8 +65,12 @@ workflow {
     // If threshold is provided, extract target regions from the BAM files
     if ( params.threshold ) {
         // Extract BAM regions based on threshold
-        EXTRACT_BAM(ch_raw_samplesheet, params.threshold)
-        ch_target_bam = EXTRACT_BAM.out.target_bam
+        EXTRACT_READS_FROM_BAM(
+            ch_raw_samplesheet, 
+            params.threshold, 
+            file("${workflow.projectDir}/bin/extract_reads_from_bam.py")
+        )
+        ch_target_bam = EXTRACT_READS_FROM_BAM.out.target_bam
     }
 
     // 3. Reference genome preparation
@@ -85,12 +107,24 @@ workflow {
     )
 
     // 6. Attention methylation analysis
-    EXTRACT_ATTENTION_METHYLATION(
-        ch_raw_samplesheet,
-        file(params.dmr_bed),
-        file(params.reference),
-        ch_fasta_index.map {meta, fasta_index -> fasta_index}
-    )
+    if (params.input_parquet) {
+        // Use parquet-based methylation calculation if parquet input is provided
+        CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET(
+            ch_parquet_samplesheet,
+            file(params.reference),
+            ch_fasta_index.map {meta, fasta_index -> fasta_index},
+            file("${workflow.projectDir}/bin/calculate_prob_weighted_methylation_from_parquet.py")
+        )
+    } else {
+        // Use original BED-based methylation calculation
+        CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED(
+            ch_raw_samplesheet,
+            file(params.dmr_bed),
+            file(params.reference),
+            ch_fasta_index.map {meta, fasta_index -> fasta_index},
+            file("${workflow.projectDir}/bin/calculate_prob_weighted_methylation_from_bed.py")
+        )
+    }
 
     // 7. Metadata preparation
     // Create meta CSV files for each analysis type
@@ -122,9 +156,15 @@ workflow {
 
     ch_target_meta = params.threshold ? create_meta_csv(METHYLDACKEL_EXTRACT_TARGET.out.bedgraph, 'target') : Channel.empty()
     ch_raw_meta = create_meta_csv(METHYLDACKEL_EXTRACT_RAW.out.bedgraph, 'raw')
-    ch_attention_meta = create_attention_meta_csv(
-        EXTRACT_ATTENTION_METHYLATION.out.cpg_sites.join(EXTRACT_ATTENTION_METHYLATION.out.cpg_prob)
-    )
+    
+    // Use the appropriate channel for attention meta based on the input source
+    ch_attention_meta = params.input_parquet ? 
+        create_attention_meta_csv(
+            CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET.out.cpg_sites.join(CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET.out.cpg_prob)
+        ) :
+        create_attention_meta_csv(
+            CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED.out.cpg_sites.join(CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED.out.cpg_prob)
+        )
 
     // 8. Matrix generation
     // Generate methylation matrices for each analysis type

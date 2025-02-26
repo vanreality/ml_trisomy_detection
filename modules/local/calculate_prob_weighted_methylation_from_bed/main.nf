@@ -1,4 +1,4 @@
-process EXTRACT_ATTENTION_METHYLATION {
+process CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED {
     tag "$meta.id"
     
     input:
@@ -6,6 +6,7 @@ process EXTRACT_ATTENTION_METHYLATION {
     path bed
     path fasta
     path fai
+    path script
 
     output:
     tuple val(meta), path("*_CpG.bedGraph"), emit: cpg_sites
@@ -13,7 +14,6 @@ process EXTRACT_ATTENTION_METHYLATION {
 
     script:
     def args = task.ext.args ?: ''
-    def script = "${workflow.projectDir}/bin/extract_attetion_methylation.py"
     def prefix = task.ext.prefix ?: "${meta.id}"
     """
     python3 ${script} \\
