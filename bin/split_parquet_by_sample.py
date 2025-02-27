@@ -3,7 +3,7 @@ import pandas as pd
 import click
 from pathlib import Path
 import numpy as np
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import warnings
 import multiprocessing
 import time
@@ -109,7 +109,13 @@ def split_parquet_by_sample(parquet_file_path, output_dir, chunksize, ncpus):
     print(f"Will process file in {num_chunks} chunks of {chunksize:,} rows")
     
     # Get column names to ensure all processes read the same columns
-    first_chunk = next(pd.read_parquet(parquet_file_path, chunksize=10))
+    # Read a small portion of the file instead of using chunksize parameter
+    print("Reading sample of data to verify columns...")
+    first_chunk = pd.read_parquet(
+        parquet_file_path,
+        engine='pyarrow',
+        filters=[('__index_level_0__', '>=', 0), ('__index_level_0__', '<', 10)]
+    )
     columns = list(first_chunk.columns)
     
     # Verify required columns exist
@@ -141,7 +147,7 @@ def split_parquet_by_sample(parquet_file_path, output_dir, chunksize, ncpus):
         }
         
         # Process results as they complete
-        for future in concurrent.futures.as_completed(futures):
+        for future in as_completed(futures):
             chunk_idx, chunk_size = futures[future]
             try:
                 chunk_result = future.result()
