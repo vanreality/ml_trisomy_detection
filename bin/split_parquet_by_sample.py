@@ -42,12 +42,9 @@ def process_sample(sample_name, label, input_file, output_dir, verbose=False):
     output_filename = f"{sample_name}_{label}.parquet"
     output_file = os.path.join(output_dir, output_filename)
     
-    # Read only the subset of data matching this sample
+    # Use pyarrow.parquet.read_table with filters parameter for better memory efficiency
     filters = [('sampledown', '=', sample_name)]
-    
-    # Use PyArrow directly for better memory efficiency
-    parquet_file = pq.ParquetFile(input_file)
-    sample_table = parquet_file.read(filters=filters)
+    sample_table = pq.read_table(input_file, filters=filters)
     
     # Write the subset to a new parquet file
     pq.write_table(sample_table, output_file)
