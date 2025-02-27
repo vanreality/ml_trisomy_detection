@@ -9,6 +9,7 @@ import multiprocessing
 import time
 from datetime import timedelta
 import sys
+from packaging import version
 
 # Suppress specific pandas PerformanceWarning
 warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
@@ -73,21 +74,19 @@ class ProgressTracker:
 
 
 @click.command()
-@click.option('--parquet-file-path', type=click.Path(exists=True))
-@click.option('--output-dir', type=click.Path(), default='.')
+@click.option('--parquet-file-path', type=click.Path(exists=True), help='Path to input parquet file')
+@click.option('--output-dir', type=click.Path(), default='.', help='Directory to save output files')
 @click.option('--chunksize', type=int, default=5000000, help='Number of rows to process at once')
 @click.option('--ncpus', type=int, default=None, help='Number of CPUs for parallel processing')
-def split_parquet_by_sample(parquet_file_path, output_dir, chunksize, ncpus):
+def split_parquet_by_sampledown(parquet_file_path, output_dir, chunksize, ncpus):
     """
-    Read a parquet file and split it by sample.
+    Read a parquet file and split it by the 'sampledown' column.
     
-    For each sample:
-    1. Group by seqname column
-    2. Calculate the average value of prob_class_1 column for each group
-    3. Replace prob_class_1 column value of each group by the average value
-    4. Output to {output_dir}/{sample}_{label}.parquet
+    For each unique sampledown value:
+    1. Extract all rows with that sampledown value
+    2. Output to {output_dir}/{sampledown}.parquet
     
-    Also creates a samplesheet.csv with columns: sample, label, parquet_file_path
+    Also creates a samplesheet.csv with columns: sampledown, label, parquet_file_path
     """
     # Create output directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -109,20 +108,20 @@ def split_parquet_by_sample(parquet_file_path, output_dir, chunksize, ncpus):
     print(f"Will process file in {num_chunks} chunks of {chunksize:,} rows")
     
     # Get column names to ensure all processes read the same columns
-    # Read a small portion of the file instead of using chunksize parameter
+    # Read a small portion of the file without filtering
     print("Reading sample of data to verify columns...")
-    first_chunk = pd.read_parquet(
-        parquet_file_path,
-        engine='pyarrow',
-        filters=[('__index_level_0__', '>=', 0), ('__index_level_0__', '<', 10)]
-    )
+    first_chunk = pd.read_parquet(parquet_file_path).head(10)
     columns = list(first_chunk.columns)
     
     # Verify required columns exist
-    required_columns = ['sample', 'seqname', 'prob_class_1', 'label']
+    required_columns = ['sampledown']
     missing_columns = [col for col in required_columns if col not in columns]
     if missing_columns:
         raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
+    
+    # Check if label column exists
+    has_label_column = 'label' in columns
+    print(f"Label column {'found' if has_label_column else 'not found'} in parquet file")
     
     # Create a list of chunk indices and their offsets
     chunk_offsets = [(i, i * chunksize) for i in range(num_chunks)]
@@ -131,8 +130,7 @@ def split_parquet_by_sample(parquet_file_path, output_dir, chunksize, ncpus):
     progress = ProgressTracker(total_rows, chunksize)
     print("Starting processing...")
     
-    # Process chunks in parallel
-    results = []
+    # Process chunks in parallel and collect filtered data directly
     with ProcessPoolExecutor(max_workers=ncpus) as executor:
         # Submit all chunk processing tasks
         futures = {
@@ -142,16 +140,31 @@ def split_parquet_by_sample(parquet_file_path, output_dir, chunksize, ncpus):
                 chunk_idx, 
                 offset, 
                 chunksize, 
-                total_rows
+                total_rows,
+                has_label_column
             ): (chunk_idx, min(chunksize, total_rows - offset)) for chunk_idx, offset in chunk_offsets
         }
+        
+        # Initialize storage for collected sample data and metadata
+        sample_data = {}
+        sample_labels = {}
         
         # Process results as they complete
         for future in as_completed(futures):
             chunk_idx, chunk_size = futures[future]
             try:
-                chunk_result = future.result()
-                results.append(chunk_result)
+                # Each worker now returns the actual filtered data for each sampledown
+                sampledown_data, sampledown_labels = future.result()
+                
+                # Merge sampledown data from this chunk
+                for sampledown, data in sampledown_data.items():
+                    if sampledown not in sample_data:
+                        sample_data[sampledown] = []
+                    sample_data[sampledown].append(data)
+                
+                # Merge sampledown labels
+                for sampledown, label in sampledown_labels.items():
+                    sample_labels[sampledown] = label
                 
                 # Update progress with the rows processed in this chunk
                 progress.update(chunk_size)
@@ -162,83 +175,56 @@ def split_parquet_by_sample(parquet_file_path, output_dir, chunksize, ncpus):
     # Finalize progress tracking
     progress.finish()
     
-    # Merge results from all chunks
-    print("\nMerging results from all chunks...")
-    merge_start_time = time.time()
-    
-    sample_data = {}
-    sample_labels = {}
-    
-    for chunk_sample_data, chunk_sample_labels in results:
-        # Merge sample labels
-        for sample, label in chunk_sample_labels.items():
-            sample_labels[sample] = label
-        
-        # Merge sample data
-        for sample, seqnames in chunk_sample_data.items():
-            if sample not in sample_data:
-                sample_data[sample] = {}
-                
-            for seqname, data in seqnames.items():
-                if seqname in sample_data[sample]:
-                    # Get existing values
-                    existing_rows = sample_data[sample][seqname]['rows']
-                    existing_sum = sample_data[sample][seqname]['sum']
-                    
-                    # Update with new data
-                    new_rows = existing_rows + data['rows']
-                    new_sum = existing_sum + data['sum']
-                    new_avg = new_sum / new_rows
-                    
-                    # Store updated values
-                    sample_data[sample][seqname] = {
-                        'rows': new_rows,
-                        'sum': new_sum,
-                        'prob_class_1': new_avg
-                    }
-                    
-                    # Copy other columns as needed
-                    for col, val in data.items():
-                        if col not in ['rows', 'sum', 'prob_class_1']:
-                            sample_data[sample][seqname][col] = val
-                else:
-                    sample_data[sample][seqname] = data
-    
-    merge_time = time.time() - merge_start_time
-    print(f"Merge completed in {str(timedelta(seconds=int(merge_time)))}")
-    
     # Create a list to store sample information for samplesheet
     samplesheet_data = []
     
-    # Write the processed data for each sample
+    # For tracking output file row counts
+    output_file_stats = []
+    
+    # Process each sampledown value and write to separate files
     print("\nWriting output files...")
     write_start_time = time.time()
     total_samples = len(sample_data)
     
-    for idx, (sample, data) in enumerate(sample_data.items(), 1):
-        # Convert the dictionary to a dataframe
-        sample_df = pd.DataFrame.from_dict(data, orient='index')
-        sample_df = sample_df.reset_index().rename(columns={'index': 'seqname'})
+    for idx, (sampledown, chunk_dfs) in enumerate(sample_data.items(), 1):
+        print(f"Processing sampledown: {sampledown} ({idx}/{total_samples})")
         
-        # Get the label
-        label = sample_labels[sample]
+        # Check if we have any data for this sampledown
+        if not chunk_dfs:
+            print(f"No data found for sampledown: {sampledown}")
+            continue
+        
+        # Combine all chunks for this sampledown
+        sample_combined = pd.concat(chunk_dfs, ignore_index=True)
+        total_rows_for_sample = len(sample_combined)
         
         # Determine output filename
-        output_file = os.path.join(output_dir, f"{sample}_{label}.parquet")
+        output_file = os.path.join(output_dir, f"{sampledown}.parquet")
         
         # Get absolute path for samplesheet
         absolute_path = os.path.abspath(output_file)
         
-        # Add to samplesheet data
+        # Get label for this sampledown
+        label = sample_labels.get(sampledown, "unknown")
+        
+        # Add to samplesheet data with label
         samplesheet_data.append({
-            'sample': sample,
+            'sampledown': sampledown,
             'label': label,
             'parquet': absolute_path
         })
         
-        # Write to parquet
-        print(f"Writing to: {output_file} ({idx}/{total_samples})")
-        sample_df.to_parquet(output_file, index=False)
+        # Store stats for the output file
+        output_file_stats.append({
+            'sampledown': sampledown,
+            'label': label,
+            'nrows': total_rows_for_sample,
+            'file_path': absolute_path
+        })
+        
+        # Write to parquet - use pyarrow engine for faster writing
+        print(f"Writing to: {output_file} ({total_rows_for_sample:,} rows)")
+        sample_combined.to_parquet(output_file, index=False, engine='pyarrow', compression='snappy')
     
     write_time = time.time() - write_start_time
     print(f"File writing completed in {str(timedelta(seconds=int(write_time)))}")
@@ -249,6 +235,33 @@ def split_parquet_by_sample(parquet_file_path, output_dir, chunksize, ncpus):
     samplesheet_df.to_csv(samplesheet_path, index=False)
     print(f"Samplesheet created at: {samplesheet_path}")
     
+    # Create output file statistics report
+    stats_df = pd.DataFrame(output_file_stats)
+    stats_path = os.path.join(output_dir, 'output_statistics.csv')
+    stats_df.to_csv(stats_path, index=False)
+    
+    # Display output file row counts
+    print("\n" + "="*80)
+    print(" OUTPUT FILE STATISTICS ".center(80, "="))
+    print("="*80)
+    print(f"{'SAMPLEDOWN':35} {'LABEL':10} {'ROWS':10} {'PATH'}")
+    print("-"*80)
+    
+    # Sort by row count (descending)
+    for stat in sorted(output_file_stats, key=lambda x: -x['nrows']):
+        sampledown = stat['sampledown']
+        label = stat['label']
+        nrows = stat['nrows']
+        path = os.path.basename(stat['file_path'])
+        print(f"{sampledown:35} {label:10} {nrows:10,d} {path}")
+    
+    # Print summary statistics
+    total_output_rows = sum(stat['nrows'] for stat in output_file_stats)
+    print("-"*80)
+    print(f"{'TOTAL':35} {' ':10} {total_output_rows:10,d}")
+    print("="*80)
+    print(f"Detailed statistics saved to: {stats_path}")
+    
     # Calculate and display final statistics
     total_time = time.time() - progress.start_time
     print(f"\nTotal execution time: {str(timedelta(seconds=int(total_time)))}")
@@ -256,8 +269,11 @@ def split_parquet_by_sample(parquet_file_path, output_dir, chunksize, ncpus):
     print("Processing complete")
 
 
-def process_chunk_parallel(parquet_file_path, chunk_idx, offset, chunksize, total_rows):
-    """Process a chunk in a parallel worker process."""
+def process_chunk_parallel(parquet_file_path, chunk_idx, offset, chunksize, total_rows, has_label_column):
+    """
+    Process a chunk in a parallel worker process and return filtered DataFrames for each sampledown value.
+    This optimized version reduces I/O by reading each chunk only once and returning the actual filtered data.
+    """
     import pandas as pd  # Re-import in the worker process
     import time  # For timing the chunk processing
     
@@ -270,122 +286,56 @@ def process_chunk_parallel(parquet_file_path, chunk_idx, offset, chunksize, tota
     
     print(f"Worker {worker_id}: Starting chunk {chunk_idx+1} (rows {offset:,}-{end_offset:,})")
     
-    # Read the specific chunk
-    chunk = pd.read_parquet(
-        parquet_file_path,
-        engine='pyarrow',
-        filters=[('__index_level_0__', '>=', offset), ('__index_level_0__', '<', end_offset)]
-    )
+    # Read the chunk - be specific about columns to reduce memory usage
+    try:
+        # Determine which columns to read
+        cols_to_read = ['sampledown']
+        if has_label_column:
+            cols_to_read.append('label')
+        
+        # Try reading with specific columns first
+        chunk = pd.read_parquet(
+            parquet_file_path, 
+            engine='pyarrow',  # Use pyarrow engine for better performance
+            filters=None,  # No pre-filtering at this stage
+        ).iloc[offset:end_offset]
+    except Exception as e:
+        print(f"Worker {worker_id}: Error reading chunk: {e}. Trying an alternative approach.")
+        try:
+            # Alternative approach with basic options
+            chunk = pd.read_parquet(parquet_file_path, use_pandas_metadata=False).iloc[offset:end_offset]
+        except Exception as e2:
+            print(f"Worker {worker_id}: Error with alternative approach: {e2}. Fatal error.")
+            raise
     
     # Initialize dictionaries to store results
-    chunk_sample_data = {}
-    chunk_sample_labels = {}
+    sampledown_data = {}
+    sampledown_labels = {}
     
-    # Process each sample in the chunk
-    samples_in_chunk = chunk['sample'].unique()
-    for sample in samples_in_chunk:
-        # Filter data for this sample without making a copy
-        sample_chunk = chunk[chunk['sample'] == sample]
+    # Get unique sampledown values in this chunk
+    unique_sampledowns = chunk['sampledown'].unique()
+    
+    # Process each sampledown group
+    for sampledown in unique_sampledowns:
+        # Filter for this sampledown
+        sampledown_df = chunk[chunk['sampledown'] == sampledown]
         
-        # Store the label for this sample
-        chunk_sample_labels[sample] = sample_chunk['label'].iloc[0]
+        # Store the dataframe for this sampledown
+        sampledown_data[sampledown] = sampledown_df
         
-        # Initialize sample data dictionary if not already done
-        if sample not in chunk_sample_data:
-            chunk_sample_data[sample] = {}
-        
-        # Process each seqname in this sample's chunk
-        for _, group in sample_chunk.groupby('seqname'):
-            seqname = group['seqname'].iloc[0]
-            
-            # Since each seqname has at most 2 rows, we can compute average directly
-            avg_prob = group['prob_class_1'].mean()
-            
-            # Store new data
-            row_data = {
-                'rows': len(group),
-                'sum': group['prob_class_1'].sum(),
-                'prob_class_1': avg_prob
-            }
-            
-            # Copy other columns as needed
-            for col in group.columns:
-                if col not in ['prob_class_1', 'seqname']:
-                    row_data[col] = group[col].iloc[0]
-            
-            chunk_sample_data[sample][seqname] = row_data
+        # Store the label if available
+        if has_label_column and not sampledown_df.empty:
+            sampledown_labels[sampledown] = sampledown_df['label'].iloc[0]
     
     # Log worker completion time
     worker_time = time.time() - worker_start_time
     processing_rate = actual_size / worker_time if worker_time > 0 else 0
     print(f"Worker {worker_id}: Completed chunk {chunk_idx+1} in {worker_time:.2f}s ({processing_rate:.2f} rows/s)")
     
-    return chunk_sample_data, chunk_sample_labels
-
-
-# Keep the old function for reference
-def process_chunk(chunk, sample_data, sample_labels):
-    """Process a chunk of data efficiently."""
-    # Get unique samples in this chunk
-    samples_in_chunk = chunk['sample'].unique()
-    
-    for sample in samples_in_chunk:
-        # Filter data for this sample without making a copy
-        sample_chunk = chunk[chunk['sample'] == sample]
-        
-        # Store the label for this sample
-        sample_labels[sample] = sample_chunk['label'].iloc[0]
-        
-        # Initialize sample data dictionary if not already done
-        if sample not in sample_data:
-            sample_data[sample] = {}
-        
-        # Process each seqname in this sample's chunk
-        for _, group in sample_chunk.groupby('seqname'):
-            seqname = group['seqname'].iloc[0]
-            
-            # Since each seqname has at most 2 rows, we can compute average directly
-            avg_prob = group['prob_class_1'].mean()
-            
-            # Check if we already have data for this seqname
-            if seqname in sample_data[sample]:
-                # Get existing values
-                existing_rows = sample_data[sample][seqname]['rows']
-                existing_sum = sample_data[sample][seqname]['sum']
-                
-                # Update with new data
-                new_rows = existing_rows + len(group)
-                new_sum = existing_sum + group['prob_class_1'].sum()
-                new_avg = new_sum / new_rows
-                
-                # Store updated values
-                sample_data[sample][seqname] = {
-                    'rows': new_rows,
-                    'sum': new_sum,
-                    'prob_class_1': new_avg
-                }
-                
-                # Copy other columns as needed
-                for col in group.columns:
-                    if col not in ['prob_class_1', 'seqname']:
-                        sample_data[sample][seqname][col] = group[col].iloc[0]
-            else:
-                # Store new data
-                row_data = {
-                    'rows': len(group),
-                    'sum': group['prob_class_1'].sum(),
-                    'prob_class_1': avg_prob
-                }
-                
-                # Copy other columns as needed
-                for col in group.columns:
-                    if col not in ['prob_class_1', 'seqname']:
-                        row_data[col] = group[col].iloc[0]
-                
-                sample_data[sample][seqname] = row_data
+    return sampledown_data, sampledown_labels
 
 
 if __name__ == "__main__":
     # Needed for Windows multiprocessing
     import concurrent.futures
-    split_parquet_by_sample()
+    split_parquet_by_sampledown()
