@@ -66,7 +66,9 @@ workflow {
             .splitCsv(header: true)
             .map { row -> 
                 def meta = [id: row.sample, label: row.label]
-                return [meta, file(row.parquet)]
+                // Ensure file path is correctly resolved with absolute path if needed
+                def parquetFile = file(row.parquet, checkIfExists: true)
+                return [meta, parquetFile]
             }
             .set { ch_parquet_samplesheet }
     }
