@@ -14,6 +14,7 @@ process SPLIT_PARQUET_BY_SAMPLE {
     """
     python3 ${script} \\
         --parquet-file-path ${parquet_file} \\
+        --ncpus ${task.cpus} \\
         ${args}
     """
 }

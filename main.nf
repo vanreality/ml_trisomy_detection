@@ -16,18 +16,42 @@ include { CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED } from './modules/local/c
 include { CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET } from './modules/local/calculate_prob_weighted_methylation_from_parquet/main'
 include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_TARGET } from './modules/local/generate_methylation_matrix/main'
 include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_RAW } from './modules/local/generate_methylation_matrix/main'
-include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_ATTENTION } from './modules/local/generate_methylation_matrix/main'
+include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_PROB_WEIGHTED } from './modules/local/generate_methylation_matrix/main'
 
 // Add aliases for DMR heatmap plotting
 include { PLOT_HEATMAP as PLOT_HEATMAP_TARGET_CPGS } from './modules/local/plot_heatmap/main'
 include { PLOT_HEATMAP as PLOT_HEATMAP_RAW_CPGS } from './modules/local/plot_heatmap/main'
-include { PLOT_HEATMAP as PLOT_HEATMAP_ATTENTION_CPGS } from './modules/local/plot_heatmap/main'
+include { PLOT_HEATMAP as PLOT_HEATMAP_PROB_WEIGHTED_CPGS } from './modules/local/plot_heatmap/main'
 include { PLOT_HEATMAP as PLOT_HEATMAP_TARGET_DMRS } from './modules/local/plot_heatmap/main'
 include { PLOT_HEATMAP as PLOT_HEATMAP_RAW_DMRS } from './modules/local/plot_heatmap/main'
-include { PLOT_HEATMAP as PLOT_HEATMAP_ATTENTION_DMRS } from './modules/local/plot_heatmap/main'
+include { PLOT_HEATMAP as PLOT_HEATMAP_PROB_WEIGHTED_DMRS } from './modules/local/plot_heatmap/main'
 
 workflow {
-    // 1. Input processing
+    // Parse mode parameter to determine which parts to run
+    def run_raw = false
+    def run_target = false
+    def run_prob_weighted = false
+    
+    if (!params.mode) {
+        // Default: run all modes if not specified
+        run_raw = true
+        run_target = params.threshold != null
+        run_prob_weighted = true
+    } else {
+        // Parse the mode parameter
+        def modes = params.mode.split('\\|')
+        run_raw = modes.contains('raw')
+        run_target = modes.contains('target') && params.threshold != null
+        run_prob_weighted = modes.contains('prob_weighted')
+    }
+    
+    // 1. Input processing and common setup
+    // ====================================
+    
+    // Reference genome preparation - common for all modes
+    SAMTOOLS_FAIDX([[:], file(params.reference)], [[:], []])
+    ch_fasta_index = SAMTOOLS_FAIDX.out.fai
+    
     // Determine input source (samplesheet or parquet)
     if (params.input_parquet) {
         // Process parquet input and create samplesheet
@@ -56,14 +80,50 @@ workflow {
             return [meta, file(row.bam), file(row.txt)]
         }
         .set { ch_samplesheet }
+    
+    // Index input BAM files - common for raw and target processing
+    if (run_raw || run_target) {
+        SAMTOOLS_INDEX(ch_samplesheet.map {meta, bam, txt -> tuple(meta, bam)})
+        ch_raw_samplesheet = ch_samplesheet.join(SAMTOOLS_INDEX.out.bai)
+    }
+    
+    // 2. RAW processing part
+    // =====================
+    if (run_raw) {
+        ch_raw_samplesheet
+            .map { meta, bam, txt, bai -> tuple(meta, bam, bai) }
+            .set { ch_raw_bam }
 
-    // 2. Initial BAM processing
-    // Index input BAM files
-    SAMTOOLS_INDEX(ch_samplesheet.map {meta, bam, txt -> tuple(meta, bam)})
-    ch_raw_samplesheet = ch_samplesheet.join(SAMTOOLS_INDEX.out.bai)
-
-    // If threshold is provided, extract target regions from the BAM files
-    if ( params.threshold ) {
+        METHYLDACKEL_EXTRACT_RAW(
+            ch_raw_bam, 
+            file(params.reference), 
+            ch_fasta_index.map {meta, fasta_index -> fasta_index}
+        )
+        
+        // Create meta CSV files for raw analysis
+        ch_raw_meta = create_meta_csv(METHYLDACKEL_EXTRACT_RAW.out.bedgraph, 'raw')
+        
+        // Generate methylation matrices for raw analysis
+        GENERATE_METHYLATION_MATRIX_RAW(ch_raw_meta, file(params.dmr_bed))
+        
+        // Generate heatmaps for CpG matrices
+        PLOT_HEATMAP_RAW_CPGS(
+            GENERATE_METHYLATION_MATRIX_RAW.out.cpgs_matrix,
+            params.chr,
+            params.format
+        )
+        
+        // Generate heatmaps for DMR matrices
+        PLOT_HEATMAP_RAW_DMRS(
+            GENERATE_METHYLATION_MATRIX_RAW.out.dmrs_matrix,
+            params.chr,
+            params.format
+        )
+    }
+    
+    // 3. TARGET processing part
+    // =======================
+    if (run_target) {
         // Extract BAM regions based on threshold
         EXTRACT_READS_FROM_BAM(
             ch_raw_samplesheet, 
@@ -71,16 +131,7 @@ workflow {
             file("${workflow.projectDir}/bin/extract_reads_from_bam.py")
         )
         ch_target_bam = EXTRACT_READS_FROM_BAM.out.target_bam
-    }
-
-    // 3. Reference genome preparation
-    // Index reference genome
-    SAMTOOLS_FAIDX([[:], file(params.reference)], [[:], []])
-    ch_fasta_index = SAMTOOLS_FAIDX.out.fai
-
-    // 4. Target BAM analysis
-    // Process extracted target regions
-    if ( params.threshold ) {
+        
         // Process extracted target regions
         SAMTOOLS_INDEX_TARGET(ch_target_bam)
         ch_target_bam_bai = SAMTOOLS_INDEX_TARGET.out.bai
@@ -91,127 +142,104 @@ workflow {
             file(params.reference), 
             ch_fasta_index.map { meta, fasta_index -> fasta_index }
         )
-    }
-
-    // 5. Raw BAM analysis
-    // Process original BAM files
-    ch_raw_bam = ch_samplesheet.map {meta, bam, txt -> tuple(meta, bam)}
-    SAMTOOLS_INDEX_RAW(ch_raw_bam)
-    ch_raw_bam_bai = SAMTOOLS_INDEX_RAW.out.bai
-    ch_raw_bam = ch_raw_bam.join(ch_raw_bam_bai)
-
-    METHYLDACKEL_EXTRACT_RAW(
-        ch_raw_bam, 
-        file(params.reference), 
-        ch_fasta_index.map {meta, fasta_index -> fasta_index}
-    )
-
-    // 6. Attention methylation analysis
-    if (params.input_parquet) {
-        // Use parquet-based methylation calculation if parquet input is provided
-        CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET(
-            ch_parquet_samplesheet,
-            file(params.reference),
-            ch_fasta_index.map {meta, fasta_index -> fasta_index},
-            file("${workflow.projectDir}/bin/calculate_prob_weighted_methylation_from_parquet.py")
-        )
-    } else {
-        // Use original BED-based methylation calculation
-        CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED(
-            ch_raw_samplesheet,
-            file(params.dmr_bed),
-            file(params.reference),
-            ch_fasta_index.map {meta, fasta_index -> fasta_index},
-            file("${workflow.projectDir}/bin/calculate_prob_weighted_methylation_from_bed.py")
-        )
-    }
-
-    // 7. Metadata preparation
-    // Create meta CSV files for each analysis type
-    def create_meta_csv = { stream, prefix ->
-        stream
-            .map { meta, bedgraph -> 
-                [meta.id, meta.label, bedgraph.toString()].join(',')
-            }
-            .collectFile(
-                name: "${prefix}_meta.csv",
-                newLine: true,
-                seed: 'sample,label,bedgraph_file_path'
-            )
-            .map { csv -> [[ id: prefix ], csv] }
-    }
-
-    def create_attention_meta_csv = { stream ->
-        stream
-            .map { meta, bedgraph, prob_file -> 
-                [meta.id, meta.label, bedgraph.toString(), prob_file.toString()].join(',')
-            }
-            .collectFile(
-                name: "attention_meta.csv",
-                newLine: true,
-                seed: 'sample,label,bedgraph_file_path,prob_file_path'
-            )
-            .map { csv -> [[ id: 'attention' ], csv] }
-    }
-
-    ch_target_meta = params.threshold ? create_meta_csv(METHYLDACKEL_EXTRACT_TARGET.out.bedgraph, 'target') : Channel.empty()
-    ch_raw_meta = create_meta_csv(METHYLDACKEL_EXTRACT_RAW.out.bedgraph, 'raw')
-    
-    // Use the appropriate channel for attention meta based on the input source
-    ch_attention_meta = params.input_parquet ? 
-        create_attention_meta_csv(
-            CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET.out.cpg_sites.join(CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET.out.cpg_prob)
-        ) :
-        create_attention_meta_csv(
-            CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED.out.cpg_sites.join(CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED.out.cpg_prob)
-        )
-
-    // 8. Matrix generation
-    // Generate methylation matrices for each analysis type
-    if ( params.threshold ) {
+        
+        // Create meta CSV files for target analysis
+        ch_target_meta = create_meta_csv(METHYLDACKEL_EXTRACT_TARGET.out.bedgraph, 'target')
+        
+        // Generate methylation matrices for target analysis
         GENERATE_METHYLATION_MATRIX_TARGET(ch_target_meta, file(params.dmr_bed))
-    }
-    GENERATE_METHYLATION_MATRIX_RAW(ch_raw_meta, file(params.dmr_bed))
-    GENERATE_METHYLATION_MATRIX_ATTENTION(ch_attention_meta, file(params.dmr_bed))
-
-    // 9. Visualization
-    // Generate heatmaps for CpG matrices
-    if ( params.threshold ) {
-        // Generate heatmaps for CpG matrices for target analysis
+        
+        // Generate heatmaps for target analysis
         PLOT_HEATMAP_TARGET_CPGS(
             GENERATE_METHYLATION_MATRIX_TARGET.out.cpgs_matrix,
             params.chr,
             params.format
         )
-    }
-    PLOT_HEATMAP_RAW_CPGS(
-        GENERATE_METHYLATION_MATRIX_RAW.out.cpgs_matrix,
-        params.chr,
-        params.format
-    )
-    PLOT_HEATMAP_ATTENTION_CPGS(
-        GENERATE_METHYLATION_MATRIX_ATTENTION.out.cpgs_matrix,
-        params.chr,
-        params.format
-    )
-
-    // Generate heatmaps for DMR matrices
-    if ( params.threshold ) {
-        // Generate heatmaps for DMR matrices for target analysis
+        
         PLOT_HEATMAP_TARGET_DMRS(
             GENERATE_METHYLATION_MATRIX_TARGET.out.dmrs_matrix,
             params.chr,
             params.format
         )
     }
-    PLOT_HEATMAP_RAW_DMRS(
-        GENERATE_METHYLATION_MATRIX_RAW.out.dmrs_matrix,
-        params.chr,
-        params.format
-    )
-    PLOT_HEATMAP_ATTENTION_DMRS(
-        GENERATE_METHYLATION_MATRIX_ATTENTION.out.dmrs_matrix,
-        params.chr,
-        params.format
-    )
+    
+    // 4. PROB_WEIGHTED processing part
+    // ==============================
+    if (run_prob_weighted) {
+        if (params.input_parquet) {
+            // Use parquet-based methylation calculation if parquet input is provided
+            CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET(
+                ch_parquet_samplesheet,
+                file(params.reference),
+                ch_fasta_index.map {meta, fasta_index -> fasta_index},
+                file("${workflow.projectDir}/bin/calculate_prob_weighted_methylation_from_parquet.py")
+            )
+            
+            // Create meta CSV for prob-weighted analysis with parquet input
+            ch_prob_weighted_meta = create_prob_weighted_meta_csv(
+                CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET.out.cpg_sites.join(
+                    CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET.out.cpg_prob
+                )
+            )
+        } else {
+            // Use original BED-based methylation calculation
+            CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED(
+                ch_raw_samplesheet,
+                file(params.dmr_bed),
+                file(params.reference),
+                ch_fasta_index.map {meta, fasta_index -> fasta_index},
+                file("${workflow.projectDir}/bin/calculate_prob_weighted_methylation_from_bed.py")
+            )
+            
+            // Create meta CSV for prob-weighted analysis with bedgraph input
+            ch_prob_weighted_meta = create_prob_weighted_meta_csv(
+                CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED.out.cpg_sites.join(
+                    CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED.out.cpg_prob
+                )
+            )
+        }
+        
+        // Generate methylation matrices for prob-weighted analysis
+        GENERATE_METHYLATION_MATRIX_PROB_WEIGHTED(ch_prob_weighted_meta, file(params.dmr_bed))
+        
+        // Generate heatmaps for prob-weighted analysis
+        PLOT_HEATMAP_PROB_WEIGHTED_CPGS(
+            GENERATE_METHYLATION_MATRIX_PROB_WEIGHTED.out.cpgs_matrix,
+            params.chr,
+            params.format
+        )
+        
+        PLOT_HEATMAP_PROB_WEIGHTED_DMRS(
+            GENERATE_METHYLATION_MATRIX_PROB_WEIGHTED.out.dmrs_matrix,
+            params.chr,
+            params.format
+        )
+    }
+}
+
+// Helper functions for creating meta CSV files
+def create_meta_csv(stream, prefix) {
+    return stream
+        .map { meta, bedgraph -> 
+            [meta.id, meta.label, bedgraph.toString()].join(',')
+        }
+        .collectFile(
+            name: "${prefix}_meta.csv",
+            newLine: true,
+            seed: 'sample,label,bedgraph_file_path'
+        )
+        .map { csv -> [[ id: prefix ], csv] }
+}
+
+def create_prob_weighted_meta_csv(stream) {
+    return stream
+        .map { meta, bedgraph, prob_file -> 
+            [meta.id, meta.label, bedgraph.toString(), prob_file.toString()].join(',')
+        }
+        .collectFile(
+            name: "prob_weighted_meta.csv",
+            newLine: true,
+            seed: 'sample,label,bedgraph_file_path,prob_file_path'
+        )
+        .map { csv -> [[ id: 'prob_weighted' ], csv] }
 }
