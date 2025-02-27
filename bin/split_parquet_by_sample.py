@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 import os
 import click
 import pandas as pd
@@ -32,13 +31,6 @@ def process_sample(sample_info, input_file, verbose=False):
     
     # Write the subset to a new parquet file
     sample_df.to_parquet(output_file, index=False)
-    
-    return {
-        'sample': sample_name,
-        'label': label,
-        'output_file': output_file,
-        'nrow': len(sample_df)
-    }
 
 @click.command()
 @click.option('--input', required=True, help='Path to the input parquet file')
@@ -72,30 +64,8 @@ def main(input, ncpus, verbose):
     process_fn = partial(process_sample, input_file=input, verbose=verbose)
     with Pool(processes=ncpus) as pool:
         results = pool.map(process_fn, sample_tuples)
-    
-    # Prepare summary data
-    summary_data = []
-    total_rows = 0
-    
-    for result in results:
-        summary_data.append([
-            result['sample'],
-            result['label'],
-            result['output_file'],
-            result['nrow']
-        ])
-        total_rows += result['nrow']
-    
-    # Sort by sample name for consistent output
-    summary_data.sort(key=lambda x: x[0])
-    
-    # Print summary table
-    click.echo("\nSummary of output files:")
-    headers = ["Sample", "Label", "Output File", "Row Count"]
-    click.echo(tabulate(summary_data, headers=headers, tablefmt="grid"))
-    
-    click.echo(f"\nTotal rows processed: {total_rows}")
-    click.echo(f"Processing completed in {time.time() - start_time:.2f} seconds")
+
+    print('Done!')
 
 if __name__ == "__main__":
     main()

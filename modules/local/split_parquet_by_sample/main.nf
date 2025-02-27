@@ -6,7 +6,6 @@ process SPLIT_PARQUET_BY_SAMPLE {
     path(script)
     
     output:
-    tuple val(meta), path("*.parquet"), emit: parquet_files
     tuple val(meta), path("samplesheet.csv"), emit: samplesheet
     
     script:
