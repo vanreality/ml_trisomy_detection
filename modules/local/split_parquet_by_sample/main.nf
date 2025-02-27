@@ -13,7 +13,7 @@ process SPLIT_PARQUET_BY_SAMPLE {
     def args = task.ext.args ?: ''
     """
     python3 ${script} \\
-        --parquet-file-path ${parquet_file} \\
+        --input ${parquet_file} \\
         --ncpus ${task.cpus} \\
         ${args}
     """
