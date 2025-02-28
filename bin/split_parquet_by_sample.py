@@ -9,21 +9,21 @@ from tabulate import tabulate
 
 def get_unique_samples(input_file):
     """
-    Efficiently extract unique sample names and labels from a parquet file
+    Efficiently extract unique sample names from a parquet file
     without loading the entire dataset into memory.
     
     Args:
         input_file: Path to the input parquet file
         
     Returns:
-        List of tuples of (sample_name, label)
+        List of unique sample names
     """
     parquet_file = pq.ParquetFile(input_file)
-    # Only read the required columns
-    sample_table = parquet_file.read(['sampledown', 'label'])
-    # Convert to pandas, get unique combinations and convert to list of tuples
-    unique_samples = sample_table.to_pandas().drop_duplicates().values.tolist()
-    return [(row[0], row[1]) for row in unique_samples]
+    # Only read the 'sampledown' column
+    sample_table = parquet_file.read(['sampledown'])
+    # Convert to pandas, get unique values and convert to list
+    unique_samples = sample_table.to_pandas()['sampledown'].unique().tolist()
+    return unique_samples
 
 def process_sample(sample_name, label, input_file, output_dir, verbose=False):
     """
@@ -39,7 +39,7 @@ def process_sample(sample_name, label, input_file, output_dir, verbose=False):
     Returns:
         Dict with sample information and file path
     """
-    output_filename = f"{sample_name}_{label}.parquet"
+    output_filename = f"{sample_name}.parquet"
     output_file = os.path.join(output_dir, output_filename)
     
     # Use pyarrow.parquet.read_table with filters parameter for better memory efficiency
@@ -64,7 +64,7 @@ def process_sample(sample_name, label, input_file, output_dir, verbose=False):
 def main(input, output_dir, samplesheet, verbose):
     """
     Split a parquet file into multiple files based on the 'sampledown' column.
-    Each output file will be named {sampledown}_{label}.parquet.
+    Each output file will be named {sampledown}.parquet.
     Generates a samplesheet.csv with sample, label, and parquet file paths.
     """
     start_time = time.time()
@@ -79,15 +79,22 @@ def main(input, output_dir, samplesheet, verbose):
         os.makedirs(output_dir)
         click.echo(f"Created output directory: {output_dir}")
     
-    # Get the unique sample names and their labels
+    # Get the unique sample names
     click.echo(f"Reading sample information from '{input}'...")
-    sample_tuples = get_unique_samples(input)
+    sample_names = get_unique_samples(input)
     
-    click.echo(f"Found {len(sample_tuples)} unique samples. Starting processing...")
+    click.echo(f"Found {len(sample_names)} unique samples. Starting processing...")
+    
+    # Need to read labels for each sample
+    parquet_file = pq.ParquetFile(input)
+    sample_label_table = parquet_file.read(['sampledown', 'label'])
+    sample_label_df = sample_label_table.to_pandas().drop_duplicates()
+    sample_to_label = dict(zip(sample_label_df['sampledown'], sample_label_df['label']))
     
     # Process the samples sequentially with a progress bar
     results = []
-    for sample_name, label in tqdm(sample_tuples, desc="Processing samples"):
+    for sample_name in tqdm(sample_names, desc="Processing samples"):
+        label = sample_to_label.get(sample_name, None)
         result = process_sample(sample_name, label, input, output_dir, verbose)
         results.append(result)
         # Explicitly call garbage collection to free memory if needed

@@ -10,6 +10,7 @@ include { METHYLDACKEL_EXTRACT as METHYLDACKEL_EXTRACT_RAW } from './modules/nf-
 include { METHYLDACKEL_EXTRACT as METHYLDACKEL_EXTRACT_TARGET } from './modules/nf-core/methyldackel/extract/main'
 
 // Custom analysis modules
+include { SPLIT_PARQUET_BY_SAMPLE } from './modules/local/split_parquet_by_sample/main'
 include { EXTRACT_READS_FROM_BAM } from './modules/local/extract_reads_from_bam/main'
 include { CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED } from './modules/local/calculate_prob_weighted_methylation_from_bed/main'
 include { CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET } from './modules/local/calculate_prob_weighted_methylation_from_parquet/main'
@@ -53,16 +54,23 @@ workflow {
     
     // Determine input source (samplesheet or parquet)
     if (params.input_parquet) {
-        // NOTE: The split_parquet_by_sample process is assumed to have been completed before the workflow starts
-        // Directly read CSV file with parquet file paths
-        // The CSV file has columns: sample, label, parquet (containing absolute paths to parquet files)
-        Channel
-            .fromPath(params.input_parquet)
+        // Run split_parquet_by_sample process to split input parquet file by sample
+        SPLIT_PARQUET_BY_SAMPLE(
+            [[id: "sample"], file(params.input_parquet)],
+            file("${workflow.projectDir}/bin/split_parquet_by_sample.py")
+        )
+
+        // Parse the generated samplesheet CSV to create channel
+        SPLIT_PARQUET_BY_SAMPLE.out.samplesheet
+            .map { meta, samplesheet -> samplesheet }
             .splitCsv(header: true)
             .map { row -> 
                 def meta = [id: row.sample, label: row.label]
-                // Ensure file path is correctly resolved with absolute path if needed
-                def parquetFile = file(row.parquet, checkIfExists: true)
+                // Check if parquet file exists
+                def parquetFile = file(row.parquet)
+                if (!parquetFile.exists()) {
+                    error "Parquet file not found: ${row.parquet}"
+                }
                 return [meta, parquetFile]
             }
             .set { ch_parquet_samplesheet }
