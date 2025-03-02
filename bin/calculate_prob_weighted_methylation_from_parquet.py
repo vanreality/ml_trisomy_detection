@@ -263,7 +263,7 @@ def calculate_weighted_methylation(results_df):
 @click.option('--parquet', required=True, type=click.Path(exists=True), help='Path to the parquet file')
 @click.option('--fasta', required=True, type=click.Path(exists=True), help='Path to the reference genome FASTA file')
 @click.option('--output', required=True, type=str, help='Prefix for output files')
-@click.option('--batch-size', default=1000, type=int, help='Number of records to process in each batch')
+@click.option('--batch-size', default=100000, type=int, help='Number of records to process in each batch')
 @click.option('--num-workers', default=None, type=int, help='Number of worker processes for parallel processing')
 @click.option('--n-bp-downstream', default=20, type=int, help='Number of base pairs downstream to include in the reference extract')
 def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream):

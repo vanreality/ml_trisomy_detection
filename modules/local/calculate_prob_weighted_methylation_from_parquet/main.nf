@@ -19,7 +19,7 @@ process CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET {
         ${args} \\
         --parquet ${parquet} \\
         --fasta ${fasta} \\
-        --output ${prefix}_cpg_prob.csv \\
+        --output ${prefix} \\
         --num-workers ${task.cpus}
     """
 }
