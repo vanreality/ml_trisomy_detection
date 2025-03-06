@@ -76,18 +76,17 @@ workflow {
             .set { ch_parquet_samplesheet }
     }
     
-    // Read and parse input CSV file (original behavior)
-    Channel
-        .fromPath(params.input_samplesheet)
-        .splitCsv(header: true)
-        .map { row -> 
-            def meta = [id: row.sample, label: row.label]
-            return [meta, file(row.bam), file(row.txt)]
-        }
-        .set { ch_samplesheet }
-    
     // Index input BAM files - common for raw and target processing
     if (run_raw || run_target) {
+        // Read and parse input CSV file (original behavior)
+        Channel
+            .fromPath(params.input_samplesheet)
+            .splitCsv(header: true)
+            .map { row -> 
+                def meta = [id: row.sample, label: row.label]
+                return [meta, file(row.bam), file(row.txt)]
+            }
+            .set { ch_samplesheet }
         SAMTOOLS_INDEX(ch_samplesheet.map {meta, bam, txt -> tuple(meta, bam)})
         ch_raw_samplesheet = ch_samplesheet.join(SAMTOOLS_INDEX.out.bai)
     }
