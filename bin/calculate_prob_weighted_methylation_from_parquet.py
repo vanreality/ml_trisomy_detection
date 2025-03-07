@@ -135,7 +135,7 @@ def identify_cpg_sites(reference_seq, alignment, ref_start_pos, original_seq):
     
     return cpg_sites
 
-def process_batch(batch, reference_genome, n_bp_downstream=20):
+def process_batch(batch, reference_genome, n_bp_downstream=20, n_bp_upstream=20):
     """
     Process a batch of sequences from the parquet file.
     
@@ -143,6 +143,7 @@ def process_batch(batch, reference_genome, n_bp_downstream=20):
         batch: Pandas DataFrame containing a batch of sequence records
         reference_genome: Dictionary of chromosome sequences
         n_bp_downstream: Number of base pairs downstream to include in the reference extract
+        n_bp_upstream: Number of base pairs upstream to include in the reference extract
         
     Returns:
         List of dictionaries with CpG methylation data
@@ -156,9 +157,9 @@ def process_batch(batch, reference_genome, n_bp_downstream=20):
         sequence = row['seq']
         prob = row['prob_class_1']
         
-        # Extract reference region with extra bases downstream
+        # Extract reference region with extra bases upstream and downstream
         ref_region = extract_region_from_reference(
-            reference_genome, chr_name, start_pos, end_pos + n_bp_downstream
+            reference_genome, chr_name, start_pos - n_bp_upstream, end_pos + n_bp_downstream
         )
         
         if ref_region is None or len(ref_region) == 0:
@@ -185,7 +186,7 @@ def process_batch(batch, reference_genome, n_bp_downstream=20):
     
     return results
 
-def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_workers=None, n_bp_downstream=20):
+def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_workers=None, n_bp_downstream=20, n_bp_upstream=20):
     """
     Process sequences from a parquet file to determine CpG methylation status.
     
@@ -195,6 +196,7 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
         batch_size: Number of records to process in each batch
         num_workers: Number of worker processes for parallel processing
         n_bp_downstream: Number of base pairs downstream to include in the reference extract
+        n_bp_upstream: Number of base pairs upstream to include in the reference extract
         
     Returns:
         Pandas DataFrame with CpG methylation data
@@ -220,7 +222,7 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
     total_batches = (len(df) + batch_size - 1) // batch_size
     
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        batch_processor = partial(process_batch, reference_genome=reference_genome, n_bp_downstream=n_bp_downstream)
+        batch_processor = partial(process_batch, reference_genome=reference_genome, n_bp_downstream=n_bp_downstream, n_bp_upstream=n_bp_upstream)
         
         for i in range(total_batches):
             start_idx = i * batch_size
@@ -266,7 +268,8 @@ def calculate_weighted_methylation(results_df):
 @click.option('--batch-size', default=100000, type=int, help='Number of records to process in each batch')
 @click.option('--num-workers', default=None, type=int, help='Number of worker processes for parallel processing')
 @click.option('--n-bp-downstream', default=20, type=int, help='Number of base pairs downstream to include in the reference extract')
-def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream):
+@click.option('--n-bp-upstream', default=20, type=int, help='Number of base pairs upstream to include in the reference extract')
+def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream, n_bp_upstream):
     """
     Process sequencing data to determine CpG methylation status.
     """
@@ -278,7 +281,8 @@ def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream):
         parquet, reference_genome, 
         batch_size=batch_size, 
         num_workers=num_workers,
-        n_bp_downstream=n_bp_downstream
+        n_bp_downstream=n_bp_downstream,
+        n_bp_upstream=n_bp_upstream
     )
     
     # Write detailed results to CSV
