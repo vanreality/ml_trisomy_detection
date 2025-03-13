@@ -78,26 +78,43 @@ workflow {
     
     // Index input BAM files - common for raw and target processing
     if (run_raw || run_target) {
-        // Read and parse input CSV file (original behavior)
-        Channel
+        // Read and parse input CSV file 
+        def input_channel = Channel
             .fromPath(params.input_samplesheet)
             .splitCsv(header: true)
-            .map { row -> 
-                def meta = [id: row.sample, label: row.label]
-                return [meta, file(row.bam), file(row.txt)]
-            }
-            .set { ch_samplesheet }
-        SAMTOOLS_INDEX(ch_samplesheet.map {meta, bam, txt -> tuple(meta, bam)})
-        ch_raw_samplesheet = ch_samplesheet.join(SAMTOOLS_INDEX.out.bai)
+        
+        if (run_raw) {
+            // For raw processing, we only need the BAM files
+            input_channel
+                .map { row -> 
+                    def meta = [id: row.sample, label: row.label]
+                    return [meta, file(row.bam)]
+                }
+                .set { ch_raw_bam_input }
+                
+            SAMTOOLS_INDEX_RAW(ch_raw_bam_input)
+            ch_raw_bam = ch_raw_bam_input.join(SAMTOOLS_INDEX_RAW.out.bai)
+        }
+        
+        if (run_target) {
+            // For target processing, we need both BAM and TXT files
+            input_channel
+                .map { row -> 
+                    def meta = [id: row.sample, label: row.label]
+                    return [meta, file(row.bam), file(row.txt)]
+                }
+                .set { ch_target_input }
+                
+            SAMTOOLS_INDEX(ch_target_input.map {meta, bam, txt -> tuple(meta, bam)})
+            ch_target_samplesheet = ch_target_input.join(SAMTOOLS_INDEX.out.bai)
+        }
     }
     
     // 2. RAW processing part
     // =====================
     if (run_raw) {
-        ch_raw_samplesheet
-            .map { meta, bam, txt, bai -> tuple(meta, bam, bai) }
-            .set { ch_raw_bam }
-
+        // ch_raw_bam is already prepared with necessary BAM and BAI files
+        
         METHYLDACKEL_EXTRACT_RAW(
             ch_raw_bam, 
             file(params.reference), 
@@ -130,7 +147,7 @@ workflow {
     if (run_target) {
         // Extract BAM regions based on threshold
         EXTRACT_READS_FROM_BAM(
-            ch_raw_samplesheet, 
+            ch_target_samplesheet, 
             params.threshold, 
             file("${workflow.projectDir}/bin/extract_reads_from_bam.py")
         )
@@ -186,14 +203,44 @@ workflow {
                 )
             )
         } else {
+            // For bed-based calculations, either raw or target mode must be active
+            if (!run_raw && !run_target) {
+                error "Cannot run probability weighted methylation calculation with bedGraph input. Either 'raw' or 'target' mode must be active."
+            }
+            
             // Use original BED-based methylation calculation
-            CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED(
-                ch_raw_samplesheet,
-                file(params.dmr_bed),
-                file(params.reference),
-                ch_fasta_index.map {meta, fasta_index -> fasta_index},
-                file("${workflow.projectDir}/bin/calculate_prob_weighted_methylation_from_bed.py")
-            )
+            if (run_target) {
+                CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED(
+                    ch_target_samplesheet,
+                    file(params.dmr_bed),
+                    file(params.reference),
+                    ch_fasta_index.map {meta, fasta_index -> fasta_index},
+                    file("${workflow.projectDir}/bin/calculate_prob_weighted_methylation_from_bed.py")
+                )
+            } else if (run_raw) {
+                // For raw mode, we need to ensure the channel has the right format (meta, bam, txt, bai)
+                // We need to read the input sample sheet again to get the txt files
+                Channel
+                    .fromPath(params.input_samplesheet)
+                    .splitCsv(header: true)
+                    .map { row -> 
+                        def meta = [id: row.sample, label: row.label]
+                        return [meta, file(row.bam), file(row.txt)]
+                    }
+                    .join(ch_raw_bam.map { meta, bam, bai -> tuple(meta, bam) })
+                    .map { meta, bam, txt, bai -> tuple(meta, bam, txt, bai) }
+                    .set { ch_prob_weighted_input }
+                    
+                CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_BED(
+                    ch_prob_weighted_input,
+                    file(params.dmr_bed),
+                    file(params.reference),
+                    ch_fasta_index.map {meta, fasta_index -> fasta_index},
+                    file("${workflow.projectDir}/bin/calculate_prob_weighted_methylation_from_bed.py")
+                )
+            } else {
+                error "Neither 'raw' nor 'target' mode is active. Cannot run probability weighted methylation calculation."
+            }
             
             // Create meta CSV for prob-weighted analysis with bedgraph input
             ch_prob_weighted_meta = create_prob_weighted_meta_csv(
