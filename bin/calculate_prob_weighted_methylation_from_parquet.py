@@ -268,7 +268,7 @@ def calculate_weighted_methylation(results_df):
 @click.option('--batch-size', default=100000, type=int, help='Number of records to process in each batch')
 @click.option('--num-workers', default=None, type=int, help='Number of worker processes for parallel processing')
 @click.option('--n-bp-downstream', default=20, type=int, help='Number of base pairs downstream to include in the reference extract')
-@click.option('--n-bp-upstream', default=20, type=int, help='Number of base pairs upstream to include in the reference extract')
+@click.option('--n-bp-upstream', default=0, type=int, help='Number of base pairs upstream to include in the reference extract')
 def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream, n_bp_upstream):
     """
     Process sequencing data to determine CpG methylation status.
