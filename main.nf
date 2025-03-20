@@ -94,9 +94,10 @@ workflow {
     // Index input BAM files - common for raw and target processing
     if (run_raw || run_target) {
         // Read and parse input CSV file 
-        def input_channel = Channel
+        Channel
             .fromPath(params.input_samplesheet)
             .splitCsv(header: true)
+            .set { input_channel}
         
         if (run_raw) {
             // For raw processing, we only need the BAM files
