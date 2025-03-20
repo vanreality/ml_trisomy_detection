@@ -7,6 +7,7 @@ process SPLIT_PARQUET_BY_SAMPLE {
     
     output:
     tuple val(meta), path("samplesheet.csv"), emit: samplesheet
+    path("*.parquet"), emit: parquet_files
     
     script:
     def args = task.ext.args ?: ''
