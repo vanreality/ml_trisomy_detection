@@ -156,6 +156,11 @@ def process_batch(batch, reference_genome, n_bp_downstream=20, n_bp_upstream=20)
         end_pos = row['end']
         sequence = row['seq']
         prob = row['prob_class_1']
+        name = row['name']
+        insert_size = row['insert_size']
+        chr_dmr = row['chr_dmr']
+        start_dmr = row['start_dmr']
+        end_dmr = row['end_dmr']
         
         # Extract reference region with extra bases upstream and downstream
         ref_region = extract_region_from_reference(
@@ -181,7 +186,12 @@ def process_batch(batch, reference_genome, n_bp_downstream=20, n_bp_upstream=20)
                     'start': cpg['cpg_start'],
                     'end': cpg['cpg_end'],
                     'status': cpg['status'],
-                    'prob_class_1': prob
+                    'prob_class_1': prob,
+                    'name': name,
+                    'insert_size': insert_size,
+                    'chr_dmr': chr_dmr,
+                    'start_dmr': start_dmr,
+                    'end_dmr': end_dmr
                 })
     
     return results
