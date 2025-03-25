@@ -103,11 +103,14 @@ def filter_by_insert_size(prob_df, insert_size_cutoff):
     
     Args:
         prob_df (pd.DataFrame): DataFrame containing probability data.
-        insert_size_cutoff (int): Maximum insert size to include.
+        insert_size_cutoff (int, optional): Maximum insert size to include. If None, no filtering is applied.
         
     Returns:
         pd.DataFrame: Filtered probability DataFrame.
     """
+    if insert_size_cutoff is None:
+        return prob_df
+        
     if 'insert_size' not in prob_df.columns:
         console.print("[yellow]Warning: 'insert_size' column not found in probability file. No filtering applied.[/yellow]")
         return prob_df
@@ -138,7 +141,7 @@ def process_single_sample(sample_info, regions_df, insert_size_cutoff):
     Args:
         sample_info (dict): Dictionary containing sample information.
         regions_df (pd.DataFrame): DataFrame containing regions to filter by (optional).
-        insert_size_cutoff (int): Maximum insert size to include.
+        insert_size_cutoff (int, optional): Maximum insert size to include. If None, no filtering is applied.
         
     Returns:
         tuple: Sample name and chromosome-level methylation data.
@@ -157,7 +160,7 @@ def process_single_sample(sample_info, regions_df, insert_size_cutoff):
         if regions_df is not None:
             prob_df = filter_sites_by_regions(prob_df, regions_df)
         
-        # Filter by insert size
+        # Filter by insert size if cutoff is provided
         prob_df = filter_by_insert_size(prob_df, insert_size_cutoff)
         
         # Calculate chromosome-level methylation
@@ -175,7 +178,7 @@ def process_samples_parallel(meta, regions_df, insert_size_cutoff, ncpus):
     Args:
         meta (pd.DataFrame): DataFrame containing sample metadata.
         regions_df (pd.DataFrame): DataFrame containing regions to filter by (optional).
-        insert_size_cutoff (int): Maximum insert size to include.
+        insert_size_cutoff (int, optional): Maximum insert size to include. If None, no filtering is applied.
         ncpus (int): Number of CPU cores to use.
         
     Returns:
@@ -230,7 +233,7 @@ def process_samples(meta, regions_df, insert_size_cutoff, prefix, ncpus):
     Args:
         meta (pd.DataFrame): DataFrame containing sample metadata.
         regions_df (pd.DataFrame): DataFrame containing regions to filter by (optional).
-        insert_size_cutoff (int): Maximum insert size to include.
+        insert_size_cutoff (int, optional): Maximum insert size to include. If None, no filtering is applied.
         prefix (str): Prefix for output files.
         ncpus (int): Number of CPU cores to use.
     """
@@ -248,7 +251,7 @@ def process_samples(meta, regions_df, insert_size_cutoff, prefix, ncpus):
 @click.command()
 @click.option('--meta-file', required=True, help='Path to metadata CSV file')
 @click.option('--bed-file', required=False, help='Path to BED file with selected regions (optional)')
-@click.option('--insert-size-cutoff', default=150, type=int, help='Maximum insert size to include (default: 150)')
+@click.option('--insert-size-cutoff', type=int, help='Maximum insert size to include (optional)')
 @click.option('--output-prefix', required=True, help='Prefix for output files')
 @click.option('--ncpus', default=1, type=int, help='Number of CPU cores to use')
 def main(meta_file, bed_file, insert_size_cutoff, output_prefix, ncpus):
@@ -276,7 +279,11 @@ def main(meta_file, bed_file, insert_size_cutoff, output_prefix, ncpus):
             regions_df = read_bed_file(bed_file)
         
         # Process samples
-        console.print(f"Using insert size cutoff: {insert_size_cutoff}")
+        if insert_size_cutoff is not None:
+            console.print(f"Using insert size cutoff: {insert_size_cutoff}")
+        else:
+            console.print("[yellow]No insert size cutoff provided. Using all sites.[/yellow]")
+            
         process_samples(meta, regions_df, insert_size_cutoff, output_prefix, ncpus)
         
     except Exception as e:
