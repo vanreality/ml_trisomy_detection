@@ -218,7 +218,7 @@ def process_single_sample(sample_info, regions_df, cpg_sites_df, insert_size_cut
         tuple: Sample name and chromosome-level methylation data.
         
     Raises:
-        Exception: If there's an error processing the sample.
+        Exception: If there's an error processing the sample or if filtering results in empty DataFrame.
     """
     sample_name = sample_info['sample']
     prob_file_path = sample_info['prob_file_path']
@@ -226,24 +226,39 @@ def process_single_sample(sample_info, regions_df, cpg_sites_df, insert_size_cut
     try:
         # Read probability file
         prob_df = read_prob_file(prob_file_path)
+        if prob_df.empty:
+            raise ValueError(f"Empty probability file: {prob_file_path}")
         
         # Apply regions filter if regions_df is provided
         if regions_df is not None:
             prob_df = filter_sites_by_regions(prob_df, regions_df)
+            if prob_df.empty:
+                raise ValueError(f"No sites found in DMR regions for sample: {sample_name}")
         
         # Apply CpG sites filter if cpg_sites_df is provided
         if cpg_sites_df is not None:
             prob_df = filter_by_cpg_sites(prob_df, cpg_sites_df)
+            if prob_df.empty:
+                raise ValueError(f"No matching CpG sites found for sample: {sample_name}")
         
         # Filter by insert size if cutoff is provided
-        prob_df = filter_by_insert_size(prob_df, insert_size_cutoff)
+        if insert_size_cutoff is not None:
+            prob_df = filter_by_insert_size(prob_df, insert_size_cutoff)
+            if prob_df.empty:
+                raise ValueError(f"No sites pass insert size filter ({insert_size_cutoff}) for sample: {sample_name}")
         
         # Filter by depth if min_depth is provided
         if min_depth is not None:
             prob_df = filter_by_depth(prob_df, min_depth)
+            if prob_df.empty:
+                raise ValueError(f"No sites pass depth filter ({min_depth}) for sample: {sample_name}")
         
         # Calculate chromosome-level methylation
         chr_meth = calculate_chr_methylation(prob_df)
+        
+        # Check if any chromosomes have valid methylation rates
+        if chr_meth['meth_rate'].isna().all():
+            raise ValueError(f"No valid methylation rates calculated for any chromosome in sample: {sample_name}")
         
         return sample_name, chr_meth
         
@@ -276,11 +291,24 @@ def process_samples_parallel(meta, regions_df, cpg_sites_df, insert_size_cutoff,
                                min_depth=min_depth)
         
         # Use tqdm for progress monitoring
-        results = list(tqdm(
-            pool.imap(process_func, meta.to_dict('records')),
-            total=len(meta),
-            desc="Processing samples"
-        ))
+        results = []
+        failed_samples = []
+        
+        for result in tqdm(pool.imap(process_func, meta.to_dict('records')),
+                         total=len(meta),
+                         desc="Processing samples"):
+            try:
+                results.append(result)
+            except Exception as e:
+                failed_samples.append(str(e))
+        
+        if failed_samples:
+            console.print("\n[red]Failed samples:[/red]")
+            for error in failed_samples:
+                console.print(f"[red]{error}[/red]")
+            if len(failed_samples) == len(meta):
+                raise ValueError("All samples failed to process. Please check the error messages above.")
+            console.print(f"\n[yellow]Warning: {len(failed_samples)} samples failed to process.[/yellow]")
     
     # Process results
     chr_data = {}
