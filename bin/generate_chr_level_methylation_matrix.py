@@ -178,7 +178,29 @@ def filter_by_cpg_sites(prob_df, cpg_sites_df):
     
     return pd.concat(results, axis=0, ignore_index=True)
 
-def process_single_sample(sample_info, regions_df, cpg_sites_df, insert_size_cutoff):
+def filter_by_depth(prob_df, min_depth):
+    """Filters probability data based on minimum depth at each CpG position.
+    
+    Args:
+        prob_df (pd.DataFrame): DataFrame containing probability data.
+        min_depth (int): Minimum number of reads required at each CpG position.
+        
+    Returns:
+        pd.DataFrame: Filtered probability DataFrame.
+    """
+    # Group by chromosome and position to count depth
+    depth_df = prob_df.groupby(['chr', 'start', 'end']).size().reset_index(name='depth')
+    
+    # Filter positions with sufficient depth
+    valid_positions = depth_df[depth_df['depth'] >= min_depth]
+    
+    # Merge back with original data to get all rows for valid positions
+    filtered_df = pd.merge(prob_df, valid_positions[['chr', 'start', 'end']], 
+                          on=['chr', 'start', 'end'], how='inner')
+    
+    return filtered_df.reset_index(drop=True)
+
+def process_single_sample(sample_info, regions_df, cpg_sites_df, insert_size_cutoff, min_depth):
     """Process a single sample and return chromosome-level methylation data.
     
     Args:
@@ -186,6 +208,7 @@ def process_single_sample(sample_info, regions_df, cpg_sites_df, insert_size_cut
         regions_df (pd.DataFrame): DataFrame containing regions to filter by (optional).
         cpg_sites_df (pd.DataFrame): DataFrame containing specific CpG sites to include (optional).
         insert_size_cutoff (int, optional): Maximum insert size to include. If None, no filtering is applied.
+        min_depth (int, optional): Minimum number of reads required at each CpG position.
         
     Returns:
         tuple: Sample name and chromosome-level methylation data.
@@ -211,6 +234,10 @@ def process_single_sample(sample_info, regions_df, cpg_sites_df, insert_size_cut
         # Filter by insert size if cutoff is provided
         prob_df = filter_by_insert_size(prob_df, insert_size_cutoff)
         
+        # Filter by depth if min_depth is provided
+        if min_depth is not None:
+            prob_df = filter_by_depth(prob_df, min_depth)
+        
         # Calculate chromosome-level methylation
         chr_meth = calculate_chr_methylation(prob_df)
         
@@ -220,7 +247,7 @@ def process_single_sample(sample_info, regions_df, cpg_sites_df, insert_size_cut
         console.print(f"[red]Error processing sample {sample_name}: {str(e)}[/red]")
         raise
 
-def process_samples_parallel(meta, regions_df, cpg_sites_df, insert_size_cutoff, ncpus):
+def process_samples_parallel(meta, regions_df, cpg_sites_df, insert_size_cutoff, min_depth, ncpus):
     """Processes samples in parallel and merges results.
     
     Args:
@@ -228,6 +255,7 @@ def process_samples_parallel(meta, regions_df, cpg_sites_df, insert_size_cutoff,
         regions_df (pd.DataFrame): DataFrame containing regions to filter by (optional).
         cpg_sites_df (pd.DataFrame): DataFrame containing specific CpG sites to include (optional).
         insert_size_cutoff (int, optional): Maximum insert size to include. If None, no filtering is applied.
+        min_depth (int, optional): Minimum number of reads required at each CpG position.
         ncpus (int): Number of CPU cores to use.
         
     Returns:
@@ -240,7 +268,8 @@ def process_samples_parallel(meta, regions_df, cpg_sites_df, insert_size_cutoff,
         process_func = partial(process_single_sample, 
                                regions_df=regions_df,
                                cpg_sites_df=cpg_sites_df,
-                               insert_size_cutoff=insert_size_cutoff)
+                               insert_size_cutoff=insert_size_cutoff,
+                               min_depth=min_depth)
         
         # Use tqdm for progress monitoring
         results = list(tqdm(
@@ -277,7 +306,7 @@ def process_samples_parallel(meta, regions_df, cpg_sites_df, insert_size_cutoff,
     
     return chr_df
 
-def process_samples(meta, regions_df, cpg_sites_df, insert_size_cutoff, prefix, ncpus):
+def process_samples(meta, regions_df, cpg_sites_df, insert_size_cutoff, min_depth, prefix, ncpus):
     """Process all samples and generate the output file.
     
     Args:
@@ -285,11 +314,12 @@ def process_samples(meta, regions_df, cpg_sites_df, insert_size_cutoff, prefix, 
         regions_df (pd.DataFrame): DataFrame containing regions to filter by (optional).
         cpg_sites_df (pd.DataFrame): DataFrame containing specific CpG sites to include (optional).
         insert_size_cutoff (int, optional): Maximum insert size to include. If None, no filtering is applied.
+        min_depth (int, optional): Minimum number of reads required at each CpG position.
         prefix (str): Prefix for output files.
         ncpus (int): Number of CPU cores to use.
     """
     # Process samples in parallel
-    chr_df = process_samples_parallel(meta, regions_df, cpg_sites_df, insert_size_cutoff, ncpus)
+    chr_df = process_samples_parallel(meta, regions_df, cpg_sites_df, insert_size_cutoff, min_depth, ncpus)
     
     # Merge with sample metadata (preserving label)
     result_df = pd.merge(meta[['sample', 'label']], chr_df, on='sample', how='right')
@@ -304,14 +334,15 @@ def process_samples(meta, regions_df, cpg_sites_df, insert_size_cutoff, prefix, 
 @click.option('--dmr', required=False, help='Path to DMR regions BED file (optional)')
 @click.option('--cpg', required=False, help='Path to CpG sites BED file (optional)')
 @click.option('--insert-size-cutoff', type=int, help='Maximum insert size to include (optional)')
+@click.option('--min-depth', type=int, help='Minimum number of reads required at each CpG position (optional)')
 @click.option('--output-prefix', required=True, help='Prefix for output files')
 @click.option('--ncpus', default=1, type=int, help='Number of CPU cores to use')
-def main(meta_file, dmr, cpg, insert_size_cutoff, output_prefix, ncpus):
+def main(meta_file, dmr, cpg, insert_size_cutoff, min_depth, output_prefix, ncpus):
     """Generate chromosome-level methylation matrix from probability files.
     
     This script calculates methylation rates at the chromosome level based on
     probability files, with optional filtering by DMR regions, specific CpG sites,
-    and insert size.
+    insert size, and minimum read depth.
     """
     try:
         # Print banner
@@ -343,7 +374,12 @@ def main(meta_file, dmr, cpg, insert_size_cutoff, output_prefix, ncpus):
         else:
             console.print("[yellow]No insert size cutoff provided. Using all sites.[/yellow]")
             
-        process_samples(meta, regions_df, cpg_sites_df, insert_size_cutoff, output_prefix, ncpus)
+        if min_depth is not None:
+            console.print(f"Using minimum depth filter: {min_depth}")
+        else:
+            console.print("[yellow]No minimum depth filter provided. Using all sites.[/yellow]")
+            
+        process_samples(meta, regions_df, cpg_sites_df, insert_size_cutoff, min_depth, output_prefix, ncpus)
         
     except Exception as e:
         console.print(f"[red]Error: {str(e)}[/red]")
