@@ -135,12 +135,56 @@ def calculate_chr_methylation(prob_df):
     
     return chr_stats
 
-def process_single_sample(sample_info, regions_df, insert_size_cutoff):
+def filter_by_cpg_sites(prob_df, cpg_sites_df):
+    """Filters probability data to include only specific CpG sites.
+    
+    Args:
+        prob_df (pd.DataFrame): DataFrame containing probability data.
+        cpg_sites_df (pd.DataFrame): DataFrame containing specific CpG sites to include.
+        
+    Returns:
+        pd.DataFrame: Filtered probability DataFrame.
+    """
+    prob_df['chr'] = prob_df['chr'].astype(str)
+    cpg_sites_df['chr'] = cpg_sites_df['chr'].astype(str)
+    
+    results = []
+    common_chroms = set(prob_df['chr'].unique()) & set(cpg_sites_df['chr'].unique())
+    
+    for chrom in common_chroms:
+        prob_chr = prob_df[prob_df['chr'] == chrom]
+        cpg_chr = cpg_sites_df[cpg_sites_df['chr'] == chrom]
+        
+        if len(prob_chr) == 0 or len(cpg_chr) == 0:
+            continue
+        
+        # Create a set of positions for faster lookup
+        cpg_positions = set(zip(cpg_chr['start'].values, cpg_chr['end'].values))
+        
+        # Filter prob_df to only include rows with positions in cpg_positions
+        matched_positions = [
+            (start, end) in cpg_positions 
+            for start, end in zip(prob_chr['start'].values, prob_chr['end'].values)
+        ]
+        
+        if not any(matched_positions):
+            continue
+            
+        matched_probs = prob_chr[matched_positions].copy().reset_index(drop=True)
+        results.append(matched_probs)
+    
+    if not results:
+        return pd.DataFrame(columns=prob_df.columns)
+    
+    return pd.concat(results, axis=0, ignore_index=True)
+
+def process_single_sample(sample_info, regions_df, cpg_sites_df, insert_size_cutoff):
     """Process a single sample and return chromosome-level methylation data.
     
     Args:
         sample_info (dict): Dictionary containing sample information.
         regions_df (pd.DataFrame): DataFrame containing regions to filter by (optional).
+        cpg_sites_df (pd.DataFrame): DataFrame containing specific CpG sites to include (optional).
         insert_size_cutoff (int, optional): Maximum insert size to include. If None, no filtering is applied.
         
     Returns:
@@ -160,6 +204,10 @@ def process_single_sample(sample_info, regions_df, insert_size_cutoff):
         if regions_df is not None:
             prob_df = filter_sites_by_regions(prob_df, regions_df)
         
+        # Apply CpG sites filter if cpg_sites_df is provided
+        if cpg_sites_df is not None:
+            prob_df = filter_by_cpg_sites(prob_df, cpg_sites_df)
+        
         # Filter by insert size if cutoff is provided
         prob_df = filter_by_insert_size(prob_df, insert_size_cutoff)
         
@@ -172,12 +220,13 @@ def process_single_sample(sample_info, regions_df, insert_size_cutoff):
         console.print(f"[red]Error processing sample {sample_name}: {str(e)}[/red]")
         raise
 
-def process_samples_parallel(meta, regions_df, insert_size_cutoff, ncpus):
+def process_samples_parallel(meta, regions_df, cpg_sites_df, insert_size_cutoff, ncpus):
     """Processes samples in parallel and merges results.
     
     Args:
         meta (pd.DataFrame): DataFrame containing sample metadata.
         regions_df (pd.DataFrame): DataFrame containing regions to filter by (optional).
+        cpg_sites_df (pd.DataFrame): DataFrame containing specific CpG sites to include (optional).
         insert_size_cutoff (int, optional): Maximum insert size to include. If None, no filtering is applied.
         ncpus (int): Number of CPU cores to use.
         
@@ -189,7 +238,8 @@ def process_samples_parallel(meta, regions_df, insert_size_cutoff, ncpus):
     
     with Pool(ncpus) as pool:
         process_func = partial(process_single_sample, 
-                               regions_df=regions_df, 
+                               regions_df=regions_df,
+                               cpg_sites_df=cpg_sites_df,
                                insert_size_cutoff=insert_size_cutoff)
         
         # Use tqdm for progress monitoring
@@ -227,18 +277,19 @@ def process_samples_parallel(meta, regions_df, insert_size_cutoff, ncpus):
     
     return chr_df
 
-def process_samples(meta, regions_df, insert_size_cutoff, prefix, ncpus):
+def process_samples(meta, regions_df, cpg_sites_df, insert_size_cutoff, prefix, ncpus):
     """Process all samples and generate the output file.
     
     Args:
         meta (pd.DataFrame): DataFrame containing sample metadata.
         regions_df (pd.DataFrame): DataFrame containing regions to filter by (optional).
+        cpg_sites_df (pd.DataFrame): DataFrame containing specific CpG sites to include (optional).
         insert_size_cutoff (int, optional): Maximum insert size to include. If None, no filtering is applied.
         prefix (str): Prefix for output files.
         ncpus (int): Number of CPU cores to use.
     """
     # Process samples in parallel
-    chr_df = process_samples_parallel(meta, regions_df, insert_size_cutoff, ncpus)
+    chr_df = process_samples_parallel(meta, regions_df, cpg_sites_df, insert_size_cutoff, ncpus)
     
     # Merge with sample metadata (preserving label)
     result_df = pd.merge(meta[['sample', 'label']], chr_df, on='sample', how='right')
@@ -250,15 +301,17 @@ def process_samples(meta, regions_df, insert_size_cutoff, prefix, ncpus):
 
 @click.command()
 @click.option('--meta-file', required=True, help='Path to metadata CSV file')
-@click.option('--bed-file', required=False, help='Path to BED file with selected regions (optional)')
+@click.option('--dmr', required=False, help='Path to DMR regions BED file (optional)')
+@click.option('--cpg', required=False, help='Path to CpG sites BED file (optional)')
 @click.option('--insert-size-cutoff', type=int, help='Maximum insert size to include (optional)')
 @click.option('--output-prefix', required=True, help='Prefix for output files')
 @click.option('--ncpus', default=1, type=int, help='Number of CPU cores to use')
-def main(meta_file, bed_file, insert_size_cutoff, output_prefix, ncpus):
+def main(meta_file, dmr, cpg, insert_size_cutoff, output_prefix, ncpus):
     """Generate chromosome-level methylation matrix from probability files.
     
     This script calculates methylation rates at the chromosome level based on
-    probability files, with optional filtering by regions and insert size.
+    probability files, with optional filtering by DMR regions, specific CpG sites,
+    and insert size.
     """
     try:
         # Print banner
@@ -272,11 +325,17 @@ def main(meta_file, bed_file, insert_size_cutoff, output_prefix, ncpus):
             console.print("[red]Error: Metadata file must contain 'sample', 'label', and 'prob_file_path' columns[/red]")
             sys.exit(1)
         
-        # Read BED file if provided
+        # Read DMR file if provided
         regions_df = None
-        if bed_file:
-            console.print(f"Reading regions from {bed_file}...")
-            regions_df = read_bed_file(bed_file)
+        if dmr:
+            console.print(f"Reading DMR regions from {dmr}...")
+            regions_df = read_bed_file(dmr)
+        
+        # Read CpG sites file if provided
+        cpg_sites_df = None
+        if cpg:
+            console.print(f"Reading CpG sites from {cpg}...")
+            cpg_sites_df = read_bed_file(cpg)
         
         # Process samples
         if insert_size_cutoff is not None:
@@ -284,7 +343,7 @@ def main(meta_file, bed_file, insert_size_cutoff, output_prefix, ncpus):
         else:
             console.print("[yellow]No insert size cutoff provided. Using all sites.[/yellow]")
             
-        process_samples(meta, regions_df, insert_size_cutoff, output_prefix, ncpus)
+        process_samples(meta, regions_df, cpg_sites_df, insert_size_cutoff, output_prefix, ncpus)
         
     except Exception as e:
         console.print(f"[red]Error: {str(e)}[/red]")
