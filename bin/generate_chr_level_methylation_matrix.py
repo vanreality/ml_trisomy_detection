@@ -195,8 +195,12 @@ def filter_by_depth(prob_df, min_depth):
     valid_positions = depth_df[depth_df['depth'] >= min_depth]
     
     # Merge back with original data to get all rows for valid positions
+    # Use suffixes to handle duplicate column names
     filtered_df = pd.merge(prob_df, valid_positions[['chr', 'start', 'end']], 
-                          on=['chr', 'start', 'end'], how='inner')
+                          on=['chr', 'start', 'end'], how='inner', suffixes=('', '_valid'))
+    
+    # Drop any duplicate columns that might have been created
+    filtered_df = filtered_df.loc[:, ~filtered_df.columns.duplicated()]
     
     return filtered_df.reset_index(drop=True)
 
@@ -322,7 +326,11 @@ def process_samples(meta, regions_df, cpg_sites_df, insert_size_cutoff, min_dept
     chr_df = process_samples_parallel(meta, regions_df, cpg_sites_df, insert_size_cutoff, min_depth, ncpus)
     
     # Merge with sample metadata (preserving label)
-    result_df = pd.merge(meta[['sample', 'label']], chr_df, on='sample', how='right')
+    # Use suffixes to handle duplicate column names
+    result_df = pd.merge(meta[['sample', 'label']], chr_df, on='sample', how='right', suffixes=('', '_chr'))
+    
+    # Drop any duplicate columns that might have been created
+    result_df = result_df.loc[:, ~result_df.columns.duplicated()]
     
     # Save results
     output_file = f'{prefix}_chr_level.tsv'
