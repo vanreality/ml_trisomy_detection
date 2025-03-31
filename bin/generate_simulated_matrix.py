@@ -545,7 +545,7 @@ def process_diluted_samples(meta, target_label, background_label, dilute_percent
     result_df = result_df[['sample', 'label', 'dilute_percentage'] + chr_cols + other_cols]
     
     # Save results
-    output_file = f'{prefix}_diluted_{dilute_percentage:.2f}.csv'
+    output_file = f'{prefix}_diluted.csv'
     result_df.to_csv(output_file, index=False)
     console.print(f"[bold green]Diluted chromosome-level methylation data saved to {output_file}[/bold green]")
 
