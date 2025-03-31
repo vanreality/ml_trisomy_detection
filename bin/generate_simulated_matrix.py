@@ -577,9 +577,9 @@ def main(meta_file, dmr, target_label, background_label, dilute_percentage, cent
         if dilute_percentage <= 0:
             console.print("[red]Error: Dilute percentage must be greater than 0[/red]")
             sys.exit(1)
-        elif dilute_percentage > 4:
-            console.print("[red]Error: Dilute percentage must be less than or equal to 4 (400%)[/red]")
-            sys.exit(1)
+        # elif dilute_percentage > 4:
+        #     console.print("[red]Error: Dilute percentage must be less than or equal to 4 (400%)[/red]")
+        #     sys.exit(1)
         
         # Read metadata
         console.print(f"Reading metadata from {meta_file}...")
