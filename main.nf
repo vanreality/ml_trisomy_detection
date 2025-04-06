@@ -17,6 +17,7 @@ include { CALCULATE_PROB_WEIGHTED_METHYLATION_FROM_PARQUET } from './modules/loc
 include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_TARGET } from './modules/local/generate_methylation_matrix/main'
 include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_RAW } from './modules/local/generate_methylation_matrix/main'
 include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_PROB_WEIGHTED } from './modules/local/generate_methylation_matrix/main'
+include { STAT_DEPTH } from './modules/local/stat_depth/main'
 
 // Add aliases for DMR heatmap plotting
 include { PLOT_HEATMAP as PLOT_HEATMAP_TARGET_CPGS } from './modules/local/plot_heatmap/main'
@@ -31,18 +32,21 @@ workflow {
     def run_raw = false
     def run_target = false
     def run_prob_weighted = false
-    
+    def run_depth = false
+
     if (!params.mode) {
         // Default: run all modes if not specified
         run_raw = true
         run_target = params.threshold != null
         run_prob_weighted = true
+        run_depth = true
     } else {
         // Parse the mode parameter
         def modes = params.mode.split('\\|')
         run_raw = modes.contains('raw')
         run_target = modes.contains('target') && params.threshold != null
         run_prob_weighted = modes.contains('prob_weighted')
+        run_depth = modes.contains('depth')
     }
     
     // 1. Input processing and common setup
@@ -280,6 +284,17 @@ workflow {
             GENERATE_METHYLATION_MATRIX_PROB_WEIGHTED.out.dmrs_matrix,
             params.chr,
             params.format
+        )
+    }
+
+    // 5. DEPTH processing part
+    // =======================
+    if (run_depth) {
+        STAT_DEPTH(
+            ch_parquet_samplesheet,
+            file(params.reference),
+            ch_fasta_index.map {meta, fasta_index -> fasta_index},
+            file("${workflow.projectDir}/bin/stat_depth.py")
         )
     }
 }
