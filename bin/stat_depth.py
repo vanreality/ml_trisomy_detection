@@ -548,7 +548,7 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
 @click.option('--batch-size', default=10000, type=int, help='Number of records to process in each batch')
 @click.option('--num-workers', default=None, type=int, help='Number of worker processes for parallel processing')
 @click.option('--n-bp-downstream', default=20, type=int, help='Number of base pairs downstream to include in the reference extract')
-@click.option('--n-bp-upstream', default=20, type=int, help='Number of base pairs upstream to include in the reference extract')
+@click.option('--n-bp-upstream', default=0, type=int, help='Number of base pairs upstream to include in the reference extract')
 @click.option('--sequential', is_flag=True, help='Run processing sequentially (no parallel workers)')
 def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream, n_bp_upstream, sequential):
     """
