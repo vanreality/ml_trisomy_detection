@@ -13,6 +13,7 @@ import pyarrow.parquet as pq
 from rich.console import Console
 from rich.logging import RichHandler
 from tqdm import tqdm
+import traceback
 
 # Configure logging with rich
 console = Console()
@@ -244,6 +245,34 @@ def identify_cpg_sites_and_bases(reference_seq, alignment, ref_start_pos, origin
     
     return cpg_sites
 
+def worker_init():
+    """
+    Initialize worker process by setting lower recursion limit.
+    This helps prevent stack overflows in worker processes.
+    """
+    # Set a lower recursion limit to avoid stack overflow
+    sys.setrecursionlimit(1000)  # Default is typically 1000
+
+def process_batch_safe(batch_data):
+    """
+    Safe wrapper around process_batch to catch exceptions in worker processes.
+    
+    Args:
+        batch_data: Tuple containing (batch, reference_genome, coordinate_map, dmr_info, n_bp_downstream, n_bp_upstream)
+        
+    Returns:
+        Same as process_batch or error information if an exception occurs
+    """
+    try:
+        batch, reference_genome, coordinate_map, dmr_info, n_bp_downstream, n_bp_upstream = batch_data
+        return process_batch(batch, reference_genome, coordinate_map, dmr_info, n_bp_downstream, n_bp_upstream), None
+    except Exception as e:
+        error_info = {
+            'error': str(e),
+            'traceback': traceback.format_exc()
+        }
+        return None, error_info
+
 def process_batch(batch, reference_genome, coordinate_map, dmr_info, n_bp_downstream=20, n_bp_upstream=20):
     """
     Process a batch of sequences from the parquet file.
@@ -300,7 +329,7 @@ def process_batch(batch, reference_genome, coordinate_map, dmr_info, n_bp_downst
     return cpg_results, depth_map, prob_weighted_depth_map
 
 def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_workers=None, 
-                       n_bp_downstream=20, n_bp_upstream=20):
+                       n_bp_downstream=20, n_bp_upstream=20, use_parallel=True):
     """
     Process sequences from a parquet file to determine depths and methylation status.
     
@@ -311,18 +340,24 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
         num_workers: Number of worker processes for parallel processing
         n_bp_downstream: Number of base pairs downstream to include in reference
         n_bp_upstream: Number of base pairs upstream to include in reference
+        use_parallel: Whether to use parallel processing or sequential processing
         
     Returns:
         Tuple of (cpg_results_df, depth_data_df)
     """
     if num_workers is None:
-        num_workers = multiprocessing.cpu_count()
+        num_workers = max(1, multiprocessing.cpu_count() - 1)  # Leave one CPU free
     
-    logger.info(f"Processing parquet file: {parquet_file} with {num_workers} workers")
+    if use_parallel:
+        logger.info(f"Processing parquet file: {parquet_file} with {num_workers} workers")
+    else:
+        logger.info(f"Processing parquet file: {parquet_file} sequentially")
     
     # Read parquet file
+    logger.info(f"Reading parquet file: {parquet_file}")
     table = pq.read_table(parquet_file)
     df = table.to_pandas()
+    logger.info(f"Loaded {len(df)} records from parquet file")
     
     # Verify required columns
     required_columns = ['chr', 'start', 'end', 'seq', 'prob_class_1', 'chr_dmr', 'start_dmr', 'end_dmr']
@@ -333,6 +368,7 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
     
     # Create coordinate mapping
     coordinate_map, virtual_length, dmr_info = create_dmr_coordinate_map(df)
+    logger.info(f"Created coordinate mapping with {virtual_length} virtual positions")
     
     # Initialize depth maps for the entire virtual coordinate space
     depth_map = {i: {} for i in range(virtual_length)}
@@ -342,49 +378,87 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
     all_cpg_results = []
     total_batches = (len(df) + batch_size - 1) // batch_size
     
-    with tqdm(total=total_batches, desc="Processing batches") as pbar:
-        with ProcessPoolExecutor(max_workers=num_workers) as executor:
-            batch_processor = partial(
-                process_batch, 
-                reference_genome=reference_genome, 
-                coordinate_map=coordinate_map,
-                dmr_info=dmr_info,
-                n_bp_downstream=n_bp_downstream, 
-                n_bp_upstream=n_bp_upstream
-            )
+    # Prepare batches
+    batches = []
+    for i in range(total_batches):
+        start_idx = i * batch_size
+        end_idx = min((i + 1) * batch_size, len(df))
+        batch = df.iloc[start_idx:end_idx]
+        batches.append((batch, reference_genome, coordinate_map, dmr_info, n_bp_downstream, n_bp_upstream))
+    
+    if use_parallel:
+        # Process in parallel
+        with tqdm(total=total_batches, desc="Processing batches") as pbar:
+            errors = []
             
-            futures = []
-            for i in range(total_batches):
-                start_idx = i * batch_size
-                end_idx = min((i + 1) * batch_size, len(df))
-                batch = df.iloc[start_idx:end_idx]
-                
-                futures.append(executor.submit(batch_processor, batch))
+            with ProcessPoolExecutor(max_workers=num_workers, initializer=worker_init) as executor:
+                for batch_idx, future in enumerate(executor.map(process_batch_safe, batches)):
+                    result, error = future
+                    
+                    if error:
+                        error_msg = f"Error in batch {batch_idx}: {error['error']}"
+                        logger.error(error_msg)
+                        logger.debug(error['traceback'])
+                        errors.append(error_msg)
+                        pbar.update(1)
+                        continue
+                    
+                    cpg_results, batch_depth_map, batch_prob_weighted_depth_map = result
+                    
+                    # Merge results
+                    all_cpg_results.extend(cpg_results)
+                    
+                    # Merge depth maps
+                    for pos in batch_depth_map:
+                        for base, count in batch_depth_map[pos].items():
+                            depth_map[pos][base] = depth_map[pos].get(base, 0) + count
+                    
+                    # Merge probability-weighted depth maps
+                    for pos in batch_prob_weighted_depth_map:
+                        for base, prob_sum in batch_prob_weighted_depth_map[pos].items():
+                            prob_weighted_depth_map[pos][base] = prob_weighted_depth_map[pos].get(base, 0) + prob_sum
+                    
+                    pbar.update(1)
             
-            for future in futures:
-                cpg_results, batch_depth_map, batch_prob_weighted_depth_map = future.result()
-                
-                # Merge results
-                all_cpg_results.extend(cpg_results)
-                
-                # Merge depth maps
-                for pos in batch_depth_map:
-                    for base, count in batch_depth_map[pos].items():
-                        depth_map[pos][base] = depth_map[pos].get(base, 0) + count
-                
-                # Merge probability-weighted depth maps
-                for pos in batch_prob_weighted_depth_map:
-                    for base, prob_sum in batch_prob_weighted_depth_map[pos].items():
-                        prob_weighted_depth_map[pos][base] = prob_weighted_depth_map[pos].get(base, 0) + prob_sum
+            if errors:
+                logger.warning(f"Completed with {len(errors)} batch errors")
+    else:
+        # Process sequentially
+        with tqdm(total=total_batches, desc="Processing batches") as pbar:
+            for batch_data in batches:
+                try:
+                    batch, reference_genome, coordinate_map, dmr_info, n_bp_downstream, n_bp_upstream = batch_data
+                    cpg_results, batch_depth_map, batch_prob_weighted_depth_map = process_batch(
+                        batch, reference_genome, coordinate_map, dmr_info, n_bp_downstream, n_bp_upstream
+                    )
+                    
+                    # Merge results
+                    all_cpg_results.extend(cpg_results)
+                    
+                    # Merge depth maps
+                    for pos in batch_depth_map:
+                        for base, count in batch_depth_map[pos].items():
+                            depth_map[pos][base] = depth_map[pos].get(base, 0) + count
+                    
+                    # Merge probability-weighted depth maps
+                    for pos in batch_prob_weighted_depth_map:
+                        for base, prob_sum in batch_prob_weighted_depth_map[pos].items():
+                            prob_weighted_depth_map[pos][base] = prob_weighted_depth_map[pos].get(base, 0) + prob_sum
+                    
+                except Exception as e:
+                    logger.error(f"Error processing batch: {str(e)}")
+                    logger.debug(traceback.format_exc())
                 
                 pbar.update(1)
     
     # Convert CpG results to DataFrame
-    cpg_results_df = pd.DataFrame(all_cpg_results)
+    logger.info(f"Found {len(all_cpg_results)} CpG sites")
+    cpg_results_df = pd.DataFrame(all_cpg_results) if all_cpg_results else pd.DataFrame()
     
     # Create depth data DataFrame
     depth_data = []
     
+    logger.info("Preparing depth data")
     # Add virtual positions with their depths
     for virtual_pos in range(virtual_length):
         # Find the original coordinates for this virtual position
@@ -443,9 +517,11 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
                 })
     
     # Convert to DataFrame and calculate normalized depth
+    logger.info("Creating depth data DataFrame")
     depth_data_df = pd.DataFrame(depth_data)
     
     if not depth_data_df.empty:
+        logger.info("Calculating normalized depths")
         # Calculate total depth at each position for normalization
         position_totals = depth_data_df.groupby('index')['prob_weighted_depth'].sum().reset_index()
         position_totals = position_totals.rename(columns={'prob_weighted_depth': 'total_prob_weighted_depth'})
@@ -469,11 +545,12 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
 @click.option('--parquet', required=True, type=click.Path(exists=True), help='Path to the parquet file')
 @click.option('--fasta', required=True, type=click.Path(exists=True), help='Path to the reference genome FASTA file')
 @click.option('--output', required=True, type=str, help='Prefix for output files')
-@click.option('--batch-size', default=100000, type=int, help='Number of records to process in each batch')
+@click.option('--batch-size', default=10000, type=int, help='Number of records to process in each batch')
 @click.option('--num-workers', default=None, type=int, help='Number of worker processes for parallel processing')
 @click.option('--n-bp-downstream', default=20, type=int, help='Number of base pairs downstream to include in the reference extract')
 @click.option('--n-bp-upstream', default=20, type=int, help='Number of base pairs upstream to include in the reference extract')
-def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream, n_bp_upstream):
+@click.option('--sequential', is_flag=True, help='Run processing sequentially (no parallel workers)')
+def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream, n_bp_upstream, sequential):
     """
     Process methylation sequencing data to calculate depth statistics at each position.
     
@@ -497,7 +574,8 @@ def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream, n_bp_
             batch_size=batch_size, 
             num_workers=num_workers,
             n_bp_downstream=n_bp_downstream,
-            n_bp_upstream=n_bp_upstream
+            n_bp_upstream=n_bp_upstream,
+            use_parallel=not sequential
         )
         
         # Write results to CSV
