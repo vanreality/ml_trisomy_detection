@@ -19,6 +19,6 @@ process STAT_DEPTH {
         --parquet ${parquet} \\
         --fasta ${fasta} \\
         --output ${prefix} \\
-        --num-workers ${task.cpus}
+        --num-workers ${task.cpus}-1
     """
 }

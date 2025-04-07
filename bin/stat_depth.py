@@ -100,6 +100,69 @@ def local_realign(seq, ref_seq):
     
     return alignments[0]
 
+def initialize_depth_data_from_reference(reference_genome, dmr_info, coordinate_map):
+    """
+    Initialize depth data with all bases from the reference genome for all DMR regions.
+    
+    Args:
+        reference_genome: Dictionary containing reference genome sequences.
+        dmr_info: List of DMR region information.
+        coordinate_map: Mapping from original to virtual coordinates.
+        
+    Returns:
+        Tuple of (depth_map, prob_weighted_depth_map, cpg_sites_count)
+        - depth_map: Dictionary mapping virtual positions to base counts (initialized with 0)
+        - prob_weighted_depth_map: Dictionary mapping virtual positions to probability-weighted base counts (initialized with 0)
+        - cpg_sites_count: Number of CpG sites found in the reference genome
+    """
+    logger.info("Initializing depth data from reference genome")
+    
+    # Initialize depth maps
+    depth_map = {}
+    prob_weighted_depth_map = {}
+    cpg_sites_count = 0
+    
+    # Process each DMR region
+    for dmr in tqdm(dmr_info, desc="Processing DMR regions"):
+        chrom = dmr['chr_dmr']
+        start = dmr['start_dmr']
+        end = dmr['end_dmr']
+        
+        # Extract the region from reference
+        region_seq = extract_region_from_reference(reference_genome, chrom, start, end)
+        if region_seq is None or len(region_seq) == 0:
+            logger.warning(f"Could not extract region for {chrom}:{start}-{end}")
+            continue
+        
+        # Process each position in the region
+        for i, base in enumerate(region_seq):
+            genome_pos = start + i
+            virtual_pos = coordinate_map.get((chrom, genome_pos))
+            
+            if virtual_pos is None:
+                continue
+            
+            # Initialize the position if not already done
+            if virtual_pos not in depth_map:
+                depth_map[virtual_pos] = {}
+                prob_weighted_depth_map[virtual_pos] = {}
+            
+            # Add the reference base with zero counts
+            if base not in depth_map[virtual_pos]:
+                depth_map[virtual_pos][base] = 0
+                prob_weighted_depth_map[virtual_pos][base] = 0
+            
+            # Check for CpG sites (where current base is C and next base is G)
+            if base == 'C' and i < len(region_seq) - 1 and region_seq[i+1] == 'G':
+                cpg_sites_count += 1
+                
+                # For CpG sites, also add M (methylated cytosine) as a possible base
+                if 'M' not in depth_map[virtual_pos]:
+                    depth_map[virtual_pos]['M'] = 0
+                    prob_weighted_depth_map[virtual_pos]['M'] = 0
+    
+    return depth_map, prob_weighted_depth_map, cpg_sites_count
+
 def create_dmr_coordinate_map(df):
     """
     Create a mapping from original genome coordinates to virtual coordinates 
@@ -109,10 +172,11 @@ def create_dmr_coordinate_map(df):
         df: DataFrame containing DMR regions with chr_dmr, start_dmr, and end_dmr columns.
         
     Returns:
-        A tuple of (coordinate_map, virtual_length, dmr_info):
+        A tuple of (coordinate_map, virtual_length, dmr_info, total_dmr_length):
             - coordinate_map: Dict mapping (chr, pos) to virtual position
             - virtual_length: Total length of virtual coordinate space
             - dmr_info: List of DMR region information
+            - total_dmr_length: Sum of all DMR region lengths
     """
     logger.info("Creating DMR coordinate mapping")
     
@@ -125,12 +189,14 @@ def create_dmr_coordinate_map(df):
     coordinate_map = {}
     dmr_info = []
     virtual_pos = 0
+    total_dmr_length = 0
     
     for _, dmr in dmr_regions.iterrows():
         chrom = dmr['chr_dmr']
         start = dmr['start_dmr']
         end = dmr['end_dmr']
         length = end - start
+        total_dmr_length += length
         
         # Map each position in this DMR to a virtual coordinate
         for i in range(length):
@@ -146,12 +212,12 @@ def create_dmr_coordinate_map(df):
         
         virtual_pos += length
     
-    return coordinate_map, virtual_pos, dmr_info
+    return coordinate_map, virtual_pos, dmr_info, total_dmr_length
 
-def identify_cpg_sites_and_bases(reference_seq, alignment, ref_start_pos, original_seq, coordinate_map, 
-                               depth_map, prob_weighted_depth_map, dmr_info, prob_class_1):
+def update_base_depth_maps(reference_seq, alignment, ref_start_pos, original_seq, coordinate_map, 
+                          depth_map, prob_weighted_depth_map, dmr_info, prob_class_1):
     """
-    Identify CpG sites in the alignment and update depth maps.
+    Update depth maps for each base in the alignment.
     
     Args:
         reference_seq: Original reference sequence
@@ -163,12 +229,7 @@ def identify_cpg_sites_and_bases(reference_seq, alignment, ref_start_pos, origin
         prob_weighted_depth_map: Map to track probability-weighted depth
         dmr_info: Information about DMR regions
         prob_class_1: Probability value for weighting
-        
-    Returns:
-        List of identified CpG sites
     """
-    cpg_sites = []
-    
     # Extract aligned sequences with gaps
     aligned_ref = alignment.target
     aligned_seq = alignment.query
@@ -227,23 +288,6 @@ def identify_cpg_sites_and_bases(reference_seq, alignment, ref_start_pos, origin
                 # Update depth maps
                 depth_map[virtual_pos][base] = depth_map[virtual_pos].get(base, 0) + 1
                 prob_weighted_depth_map[virtual_pos][base] = prob_weighted_depth_map[virtual_pos].get(base, 0) + prob_class_1
-                
-                # Specifically check for CpG sites
-                if i < len(reference_seq) - 1 and reference_seq[i:i+2] == "CG":
-                    methylation_status = 0
-                    if seq_idx < len(original_seq) and original_seq[seq_idx] == 'M':
-                        methylation_status = 1
-                    
-                    cpg_sites.append({
-                        'chr': dmr_region['chr_dmr'],
-                        'start': ref_pos,
-                        'end': ref_pos + 2,
-                        'virtual_pos': virtual_pos,
-                        'status': methylation_status,
-                        'base': original_seq[seq_idx] if seq_idx < len(original_seq) else 'C'
-                    })
-    
-    return cpg_sites
 
 def worker_init():
     """
@@ -286,17 +330,12 @@ def process_batch(batch, reference_genome, coordinate_map, dmr_info, n_bp_downst
         n_bp_upstream: Number of base pairs upstream to include in reference
         
     Returns:
-        Tuple of (cpg_results, depth_map, prob_weighted_depth_map)
+        Tuple of (depth_map, prob_weighted_depth_map)
     """
-    cpg_results = []
+    # Initialize local depth maps for this batch
+    virtual_length = max([dmr['virtual_end'] for dmr in dmr_info]) if dmr_info else 0
     depth_map = {}
     prob_weighted_depth_map = {}
-    
-    # Initialize depth maps
-    virtual_length = max([dmr['virtual_end'] for dmr in dmr_info]) if dmr_info else 0
-    for i in range(virtual_length):
-        depth_map[i] = {}
-        prob_weighted_depth_map[i] = {}
     
     for _, row in batch.iterrows():
         chr_name = row['chr']
@@ -317,19 +356,75 @@ def process_batch(batch, reference_genome, coordinate_map, dmr_info, n_bp_downst
         alignment = local_realign(sequence, ref_region)
         
         if alignment:
-            # Identify CpG sites and update depth maps
-            cpg_sites = identify_cpg_sites_and_bases(
-                ref_region, alignment, start_pos, sequence,
-                coordinate_map, depth_map, prob_weighted_depth_map, dmr_info, prob
-            )
+            # Extract aligned sequences with gaps
+            aligned_ref = alignment.target
+            aligned_seq = alignment.query
             
-            # Add results
-            cpg_results.extend(cpg_sites)
+            # Map aligned positions to reference positions
+            ref_to_align_pos = {}
+            ref_idx = 0
+            
+            for align_idx, ref_char in enumerate(aligned_ref):
+                if ref_char != '-':
+                    ref_to_align_pos[ref_idx] = align_idx
+                    ref_idx += 1
+            
+            # Map aligned positions to sequence positions
+            align_to_seq_pos = {}
+            seq_idx = 0
+            
+            for align_idx, seq_char in enumerate(aligned_seq):
+                if seq_char != '-':
+                    align_to_seq_pos[align_idx] = seq_idx
+                    seq_idx += 1
+            
+            # Process all bases in the reference sequence
+            for i in range(len(ref_region)):
+                ref_pos = start_pos - n_bp_upstream + i
+                
+                # Find the chromosome and DMR region for this position
+                dmr_region = None
+                for dmr in dmr_info:
+                    if (dmr['chr_dmr'] == chr_name and 
+                        dmr['start_dmr'] <= ref_pos < dmr['end_dmr']):
+                        dmr_region = dmr
+                        break
+                
+                if dmr_region is None:
+                    continue  # This position is not in any DMR region
+                
+                # Check if there's a virtual coordinate for this position
+                coord_key = (dmr_region['chr_dmr'], ref_pos)
+                if coord_key not in coordinate_map:
+                    continue
+                
+                virtual_pos = coordinate_map[coord_key]
+                
+                # Initialize maps for this position if needed
+                if virtual_pos not in depth_map:
+                    depth_map[virtual_pos] = {}
+                if virtual_pos not in prob_weighted_depth_map:
+                    prob_weighted_depth_map[virtual_pos] = {}
+                
+                # Check if this position is aligned
+                if i in ref_to_align_pos:
+                    align_idx = ref_to_align_pos[i]
+                    
+                    # Check if there's a corresponding position in the sequence
+                    if align_idx in align_to_seq_pos:
+                        seq_idx = align_to_seq_pos[align_idx]
+                        
+                        # Determine the base at this position
+                        base = sequence[seq_idx] if seq_idx < len(sequence) else ref_region[i]
+                        
+                        # Update local depth maps
+                        depth_map[virtual_pos][base] = depth_map[virtual_pos].get(base, 0) + 1
+                        prob_weighted_depth_map[virtual_pos][base] = prob_weighted_depth_map[virtual_pos].get(base, 0) + prob
     
-    return cpg_results, depth_map, prob_weighted_depth_map
+    return depth_map, prob_weighted_depth_map
 
-def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_workers=None, 
-                       n_bp_downstream=20, n_bp_upstream=20, use_parallel=True):
+def process_parquet_file(parquet_file, reference_genome, batch_size=10000, num_workers=None, 
+                       n_bp_downstream=0, n_bp_upstream=20, use_parallel=True):
     """
     Process sequences from a parquet file to determine depths and methylation status.
     
@@ -343,7 +438,11 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
         use_parallel: Whether to use parallel processing or sequential processing
         
     Returns:
-        Tuple of (cpg_results_df, depth_data_df)
+        Tuple of (depth_data_df, num_reads, total_dmr_length, cpg_sites_count)
+        - depth_data_df: DataFrame containing depth statistics
+        - num_reads: Number of reads in the parquet file
+        - total_dmr_length: Total length of all DMR regions
+        - cpg_sites_count: Number of CpG sites found in the reference genome
     """
     if num_workers is None:
         num_workers = max(1, multiprocessing.cpu_count() - 1)  # Leave one CPU free
@@ -357,7 +456,8 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
     logger.info(f"Reading parquet file: {parquet_file}")
     table = pq.read_table(parquet_file)
     df = table.to_pandas()
-    logger.info(f"Loaded {len(df)} records from parquet file")
+    num_reads = len(df)
+    logger.info(f"Loaded {num_reads} reads from parquet file")
     
     # Verify required columns
     required_columns = ['chr', 'start', 'end', 'seq', 'prob_class_1', 'chr_dmr', 'start_dmr', 'end_dmr']
@@ -367,15 +467,17 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
         raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
     
     # Create coordinate mapping
-    coordinate_map, virtual_length, dmr_info = create_dmr_coordinate_map(df)
+    coordinate_map, virtual_length, dmr_info, total_dmr_length = create_dmr_coordinate_map(df)
     logger.info(f"Created coordinate mapping with {virtual_length} virtual positions")
+    logger.info(f"Total DMR regions length: {total_dmr_length} bp")
     
-    # Initialize depth maps for the entire virtual coordinate space
-    depth_map = {i: {} for i in range(virtual_length)}
-    prob_weighted_depth_map = {i: {} for i in range(virtual_length)}
+    # Initialize depth maps with reference genome data
+    global_depth_map, global_prob_weighted_depth_map, cpg_sites_count = initialize_depth_data_from_reference(
+        reference_genome, dmr_info, coordinate_map
+    )
+    logger.info(f"Found {cpg_sites_count} CpG sites in reference genome")
     
     # Process data in batches
-    all_cpg_results = []
     total_batches = (len(df) + batch_size - 1) // batch_size
     
     # Prepare batches
@@ -403,20 +505,25 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
                         pbar.update(1)
                         continue
                     
-                    cpg_results, batch_depth_map, batch_prob_weighted_depth_map = result
+                    batch_depth_map, batch_prob_weighted_depth_map = result
                     
-                    # Merge results
-                    all_cpg_results.extend(cpg_results)
-                    
-                    # Merge depth maps
+                    # Merge depth maps back to global maps
                     for pos in batch_depth_map:
+                        if pos not in global_depth_map:
+                            global_depth_map[pos] = {}
+                        if pos not in global_prob_weighted_depth_map:
+                            global_prob_weighted_depth_map[pos] = {}
+                            
                         for base, count in batch_depth_map[pos].items():
-                            depth_map[pos][base] = depth_map[pos].get(base, 0) + count
+                            global_depth_map[pos][base] = global_depth_map[pos].get(base, 0) + count
                     
                     # Merge probability-weighted depth maps
                     for pos in batch_prob_weighted_depth_map:
+                        if pos not in global_prob_weighted_depth_map:
+                            global_prob_weighted_depth_map[pos] = {}
+                            
                         for base, prob_sum in batch_prob_weighted_depth_map[pos].items():
-                            prob_weighted_depth_map[pos][base] = prob_weighted_depth_map[pos].get(base, 0) + prob_sum
+                            global_prob_weighted_depth_map[pos][base] = global_prob_weighted_depth_map[pos].get(base, 0) + prob_sum
                     
                     pbar.update(1)
             
@@ -428,22 +535,27 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
             for batch_data in batches:
                 try:
                     batch, reference_genome, coordinate_map, dmr_info, n_bp_downstream, n_bp_upstream = batch_data
-                    cpg_results, batch_depth_map, batch_prob_weighted_depth_map = process_batch(
+                    batch_depth_map, batch_prob_weighted_depth_map = process_batch(
                         batch, reference_genome, coordinate_map, dmr_info, n_bp_downstream, n_bp_upstream
                     )
                     
-                    # Merge results
-                    all_cpg_results.extend(cpg_results)
-                    
-                    # Merge depth maps
+                    # Merge depth maps back to global maps
                     for pos in batch_depth_map:
+                        if pos not in global_depth_map:
+                            global_depth_map[pos] = {}
+                        if pos not in global_prob_weighted_depth_map:
+                            global_prob_weighted_depth_map[pos] = {}
+                            
                         for base, count in batch_depth_map[pos].items():
-                            depth_map[pos][base] = depth_map[pos].get(base, 0) + count
+                            global_depth_map[pos][base] = global_depth_map[pos].get(base, 0) + count
                     
                     # Merge probability-weighted depth maps
                     for pos in batch_prob_weighted_depth_map:
+                        if pos not in global_prob_weighted_depth_map:
+                            global_prob_weighted_depth_map[pos] = {}
+                            
                         for base, prob_sum in batch_prob_weighted_depth_map[pos].items():
-                            prob_weighted_depth_map[pos][base] = prob_weighted_depth_map[pos].get(base, 0) + prob_sum
+                            global_prob_weighted_depth_map[pos][base] = global_prob_weighted_depth_map[pos].get(base, 0) + prob_sum
                     
                 except Exception as e:
                     logger.error(f"Error processing batch: {str(e)}")
@@ -451,14 +563,33 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
                 
                 pbar.update(1)
     
-    # Convert CpG results to DataFrame
-    logger.info(f"Found {len(all_cpg_results)} CpG sites")
-    cpg_results_df = pd.DataFrame(all_cpg_results) if all_cpg_results else pd.DataFrame()
+    # Log some statistics about the depths
+    total_depth = sum(sum(bases.values()) for bases in global_depth_map.values())
+    logger.info(f"Total raw depth across all positions: {total_depth}")
+    total_prob_depth = sum(sum(bases.values()) for bases in global_prob_weighted_depth_map.values())
+    logger.info(f"Total probability-weighted depth: {total_prob_depth:.2f}")
     
     # Create depth data DataFrame
     depth_data = []
     
     logger.info("Preparing depth data")
+    
+    # Calculate total average prob-weighted depth for normalization
+    total_prob_weighted_depth = 0
+    total_positions_with_depth = 0
+    
+    # First pass: calculate total prob-weighted depth
+    for virtual_pos in range(virtual_length):
+        if virtual_pos in global_prob_weighted_depth_map:
+            pos_depth = sum(global_prob_weighted_depth_map[virtual_pos].values())
+            if pos_depth > 0:
+                total_prob_weighted_depth += pos_depth
+                total_positions_with_depth += 1
+    
+    # Calculate average prob-weighted depth (avoid division by zero)
+    avg_prob_weighted_depth = total_prob_weighted_depth / total_positions_with_depth if total_positions_with_depth > 0 else 1
+    logger.info(f"Average prob-weighted depth across all positions: {avg_prob_weighted_depth:.4f}")
+    
     # Add virtual positions with their depths
     for virtual_pos in range(virtual_length):
         # Find the original coordinates for this virtual position
@@ -479,28 +610,16 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
             continue
         
         # Get the bases and depths at this position
-        base_depths = depth_map[virtual_pos]
-        base_prob_weighted_depths = prob_weighted_depth_map[virtual_pos]
-        
-        if not base_depths:
-            # If no depth data, still add a row with zero depth
-            depth_data.append({
-                'index': virtual_pos,
-                'chr_dmr': original_coords['chr_dmr'],
-                'start_dmr': original_coords['start_dmr'],
-                'end_dmr': original_coords['end_dmr'],
-                'chr': original_coords['chr'],
-                'start': original_coords['start'],
-                'end': original_coords['end'],
-                'base': 'N',  # Unknown base
-                'raw_depth': 0,
-                'prob_weighted_depth': 0,
-                'normalized_depth': 0
-            })
-        else:
+        if virtual_pos in global_depth_map:
+            base_depths = global_depth_map[virtual_pos]
+            base_prob_weighted_depths = global_prob_weighted_depth_map[virtual_pos]
+            
             # Add a row for each base at this position
             for base, depth in base_depths.items():
                 prob_weighted_depth = base_prob_weighted_depths.get(base, 0)
+                
+                # Normalize using total average prob-weighted depth
+                normalized_depth = prob_weighted_depth / avg_prob_weighted_depth if avg_prob_weighted_depth > 0 else 0
                 
                 depth_data.append({
                     'index': virtual_pos,
@@ -513,33 +632,14 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
                     'base': base,
                     'raw_depth': depth,
                     'prob_weighted_depth': prob_weighted_depth,
-                    'normalized_depth': 0  # Will be calculated later
+                    'normalized_depth': normalized_depth
                 })
     
-    # Convert to DataFrame and calculate normalized depth
+    # Convert to DataFrame
     logger.info("Creating depth data DataFrame")
     depth_data_df = pd.DataFrame(depth_data)
     
-    if not depth_data_df.empty:
-        logger.info("Calculating normalized depths")
-        # Calculate total depth at each position for normalization
-        position_totals = depth_data_df.groupby('index')['prob_weighted_depth'].sum().reset_index()
-        position_totals = position_totals.rename(columns={'prob_weighted_depth': 'total_prob_weighted_depth'})
-        
-        # Merge with the depth data
-        depth_data_df = pd.merge(depth_data_df, position_totals, on='index', how='left')
-        
-        # Calculate normalized depth (avoid division by zero)
-        depth_data_df['normalized_depth'] = depth_data_df.apply(
-            lambda row: row['prob_weighted_depth'] / row['total_prob_weighted_depth'] 
-            if row['total_prob_weighted_depth'] > 0 else 0, 
-            axis=1
-        )
-        
-        # Drop the temporary column
-        depth_data_df = depth_data_df.drop('total_prob_weighted_depth', axis=1)
-    
-    return cpg_results_df, depth_data_df
+    return depth_data_df, num_reads, total_dmr_length, cpg_sites_count
 
 @click.command()
 @click.option('--parquet', required=True, type=click.Path(exists=True), help='Path to the parquet file')
@@ -556,11 +656,12 @@ def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream, n_bp_
     
     This tool follows these steps:
     1. Reads methylation sequencing data from a parquet file
-    2. Performs local realignment against the reference genome
-    3. Creates a virtual coordinate system by concatenating DMR regions
-    4. Calculates raw depth and probability-weighted depth at each position
-    5. Normalizes the probability-weighted depth
-    6. Outputs results to CSV
+    2. Initializes positions with reference genome bases, including CpG sites
+    3. Performs local realignment against the reference genome
+    4. Creates a virtual coordinate system by concatenating DMR regions
+    5. Calculates raw depth and probability-weighted depth at each position
+    6. Normalizes the probability-weighted depth using the total average
+    7. Outputs results to CSV
     """
     console.print(f"[bold green]Starting depth statistics calculation[/bold green]")
     
@@ -569,7 +670,7 @@ def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream, n_bp_
         reference_genome = read_reference_genome(fasta)
         
         # Process parquet file
-        cpg_results_df, depth_data_df = process_parquet_file(
+        depth_data_df, num_reads, total_dmr_length, cpg_sites_count = process_parquet_file(
             parquet, reference_genome, 
             batch_size=batch_size, 
             num_workers=num_workers,
@@ -584,7 +685,9 @@ def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream, n_bp_
         
         console.print(f"[bold green]Results written to: {csv_output}[/bold green]")
         console.print(f"[green]Total positions processed: {len(depth_data_df)}[/green]")
-        console.print(f"[green]Total CpG sites identified: {len(cpg_results_df)}[/green]")
+        console.print(f"[green]Total reads in parquet file: {num_reads}[/green]")
+        console.print(f"[green]Total DMR regions length: {total_dmr_length} bp[/green]")
+        console.print(f"[green]Total CpG sites identified: {cpg_sites_count}[/green]")
         
     except Exception as e:
         console.print(f"[bold red]Error: {str(e)}[/bold red]")
