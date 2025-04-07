@@ -14,6 +14,7 @@ from rich.console import Console
 from rich.logging import RichHandler
 from tqdm import tqdm
 import traceback
+import gc
 
 # Configure logging with rich
 console = Console()
@@ -561,6 +562,9 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=10000, num_w
                     logger.error(f"Error processing batch: {str(e)}")
                     logger.debug(traceback.format_exc())
                 
+                    # Clean up batch-specific data to free memory
+                    del batch_depth_map, batch_prob_weighted_depth_map
+                    gc.collect()
                 pbar.update(1)
     
     # Log some statistics about the depths
