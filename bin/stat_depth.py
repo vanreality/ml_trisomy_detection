@@ -526,6 +526,10 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=10000, num_w
                         for base, prob_sum in batch_prob_weighted_depth_map[pos].items():
                             global_prob_weighted_depth_map[pos][base] = global_prob_weighted_depth_map[pos].get(base, 0) + prob_sum
                     
+                    # Clean up batch-specific data to free memory
+                    del batch_depth_map, batch_prob_weighted_depth_map
+                    gc.collect()
+
                     pbar.update(1)
             
             if errors:
@@ -557,14 +561,15 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=10000, num_w
                             
                         for base, prob_sum in batch_prob_weighted_depth_map[pos].items():
                             global_prob_weighted_depth_map[pos][base] = global_prob_weighted_depth_map[pos].get(base, 0) + prob_sum
+
+                    # Clean up batch-specific data to free memory
+                    del batch_depth_map, batch_prob_weighted_depth_map
+                    gc.collect()
                     
                 except Exception as e:
                     logger.error(f"Error processing batch: {str(e)}")
                     logger.debug(traceback.format_exc())
                 
-                    # Clean up batch-specific data to free memory
-                    del batch_depth_map, batch_prob_weighted_depth_map
-                    gc.collect()
                 pbar.update(1)
     
     # Log some statistics about the depths
