@@ -13,7 +13,7 @@ process STAT_DEPTH {
     script:
     def args = task.ext.args ?: ''
     def prefix = task.ext.prefix ?: "${meta.id}"
-    def num_workers = task.cpus > 1 ? task.cpus - 1 : 1
+    def num_workers = task.cpus > 1 ? task.cpus / 2 : 1
     """
     python3 ${script} \\
         ${args} \\
