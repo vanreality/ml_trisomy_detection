@@ -18,6 +18,7 @@ include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_TARGET } fr
 include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_RAW } from './modules/local/generate_methylation_matrix/main'
 include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_PROB_WEIGHTED } from './modules/local/generate_methylation_matrix/main'
 include { STAT_DEPTH } from './modules/local/stat_depth/main'
+include { GENERATE_DEPTH_MATRIX } from './modules/local/generate_depth_matrix/main'
 
 // Add aliases for DMR heatmap plotting
 include { PLOT_HEATMAP as PLOT_HEATMAP_TARGET_CPGS } from './modules/local/plot_heatmap/main'
@@ -295,6 +296,27 @@ workflow {
             file(params.reference),
             ch_fasta_index.map {meta, fasta_index -> fasta_index},
             file("${workflow.projectDir}/bin/stat_depth.py")
+        )
+
+        ch_depth_samplesheet = STAT_DEPTH.out.depth_stats
+            .map { meta, depth_stats -> 
+                def csv_path = depth_stats.toAbsolutePath().toString()
+                if (!file(csv_path).exists()) {
+                    error "CSV file does not exist: ${csv_path}"
+                }
+                [meta.id, meta.label, csv_path].join(',')
+            }
+            .collectFile(
+                name: "depth_meta.csv",
+                newLine: true,
+                seed: 'sample,label,csv_file_path'
+            )
+            .map { csv -> [[ id: 'depth_samplesheet' ], csv] }
+
+        GENERATE_DEPTH_MATRIX(
+            ch_depth_samplesheet,
+            file(params.dmr_bed),
+            file("${workflow.projectDir}/bin/generate_depth_matrix.py")
         )
     }
 }
