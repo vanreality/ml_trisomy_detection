@@ -32,7 +32,7 @@ console = Console(width=120)
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
-    handlers=[RichHandler(console=console, rich_tracebacks=True, width=120, show_path=False)]
+    handlers=[RichHandler(console=console, rich_tracebacks=True, show_path=False)]
 )
 logger = logging.getLogger(__name__)
 
