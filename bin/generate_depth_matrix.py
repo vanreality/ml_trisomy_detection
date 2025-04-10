@@ -19,15 +19,25 @@ from tqdm import tqdm
 import sys
 import traceback
 import gc
+from scipy import sparse
+import warnings
+from pathlib import Path
 
-# Configure logging with rich
-console = Console()
+# Increase display width for pandas
+pd.set_option('display.width', 160)
+pd.set_option('display.max_columns', 100)
+
+# Configure logging with rich - increase width for better readability
+console = Console(width=120)
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
-    handlers=[RichHandler(console=console, rich_tracebacks=True)]
+    handlers=[RichHandler(console=console, rich_tracebacks=True, width=120, show_path=False)]
 )
 logger = logging.getLogger(__name__)
+
+# Suppress pandas PerformanceWarning
+warnings.filterwarnings("ignore", category=pd.errors.PerformanceWarning)
 
 def read_meta_file(meta_file_path):
     """
@@ -110,7 +120,7 @@ def read_depth_file_in_chunks(csv_file_path, bed_df, chunk_size=100000):
         
         # Required columns
         required_cols = ['index', 'chr_dmr', 'start_dmr', 'end_dmr', 'chr', 'start', 'end', 
-                         'base', 'raw_depth', 'prob_weighted_depth', 'normalized_depth']
+                          'base', 'raw_depth', 'prob_weighted_depth', 'normalized_depth']
         
         # Process each chunk
         for chunk_idx, chunk in enumerate(tqdm(reader, desc="Reading chunks")):
@@ -119,6 +129,11 @@ def read_depth_file_in_chunks(csv_file_path, bed_df, chunk_size=100000):
                 missing_cols = [col for col in required_cols if col not in chunk.columns]
                 if missing_cols:
                     raise ValueError(f"Missing required columns in depth file: {', '.join(missing_cols)}")
+            
+            # Convert to float32 to reduce memory usage
+            for col in ['raw_depth', 'prob_weighted_depth', 'normalized_depth']:
+                if col in chunk.columns:
+                    chunk[col] = chunk[col].astype('float32')
             
             # Filter the chunk to include only rows matching DMR regions
             filtered_chunk = pd.merge(
@@ -228,117 +243,232 @@ def process_sample(sample_row, bed_df, chunk_size):
         logger.debug(traceback.format_exc())
         return sample_id, label, None
 
-def generate_depth_matrices(meta_df, bed_df, chunk_size):
+def process_matrices_in_batches(output_prefix, indices_map, sample_data, temp_dir):
+    """
+    Process matrices in batches to avoid memory issues.
+    
+    Args:
+        output_prefix (str): Prefix for output files.
+        indices_map (dict): Mapping from index to position in the matrix.
+        sample_data (list): List of tuples (sample_id, label, raw_df, prob_df, norm_df).
+        temp_dir (str): Directory for temporary files.
+        
+    Returns:
+        tuple: Tuple of DataFrames for raw, prob, and norm matrices.
+    """
+    logger.info("Processing matrices in batches")
+    
+    # Create temp directory if it doesn't exist
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # Count total number of regions
+    n_regions = len(indices_map)
+    n_samples = len(sample_data)
+    
+    logger.info(f"Total regions: {n_regions}, Total samples: {n_samples}")
+    
+    # Create sparse matrices for each depth type (csr_matrix for efficiency)
+    raw_matrix = sparse.lil_matrix((n_regions, n_samples), dtype='float32')
+    prob_matrix = sparse.lil_matrix((n_regions, n_samples), dtype='float32')
+    norm_matrix = sparse.lil_matrix((n_regions, n_samples), dtype='float32')
+    
+    # Get list of sample IDs and labels
+    sample_ids = [s[0] for s in sample_data]
+    labels = [s[1] for s in sample_data]
+    
+    # Process each sample and add its data to the sparse matrices
+    for i, (sample_id, label, raw_series, prob_series, norm_series) in enumerate(
+            tqdm(sample_data, desc="Building sparse matrices")):
+        
+        # Add non-zero values to the sparse matrices
+        for idx, val in raw_series.items():
+            if idx in indices_map and not pd.isna(val):
+                raw_matrix[indices_map[idx], i] = val
+        
+        for idx, val in prob_series.items():
+            if idx in indices_map and not pd.isna(val):
+                prob_matrix[indices_map[idx], i] = val
+        
+        for idx, val in norm_series.items():
+            if idx in indices_map and not pd.isna(val):
+                norm_matrix[indices_map[idx], i] = val
+    
+    # Convert to CSR format for efficient operations
+    raw_matrix = raw_matrix.tocsr()
+    prob_matrix = prob_matrix.tocsr()
+    norm_matrix = norm_matrix.tocsr()
+    
+    # Create metadata DataFrame
+    meta_df = pd.DataFrame({
+        'sample': sample_ids,
+        'label': labels
+    })
+    
+    # Get the region indices as a list (preserve order)
+    region_indices = list(indices_map.keys())
+    
+    # Save the matrices to parquet files
+    meta_output = f"{output_prefix}_sample_meta.parquet"
+    meta_df.to_parquet(meta_output)
+    logger.info(f"Sample metadata saved to: {meta_output}")
+    
+    # Function to save a sparse matrix in a memory-efficient way
+    def save_sparse_matrix(matrix, indices, columns, filepath):
+        # Convert sparse matrix to COO format for efficient iteration
+        coo = matrix.tocoo()
+        
+        # Create temporary CSV file for the matrix data
+        temp_csv = f"{temp_dir}/temp_matrix.csv"
+        
+        # Write data to CSV in chunks
+        with open(temp_csv, 'w') as f:
+            # Write header
+            f.write("region_base," + ",".join(columns) + "\n")
+            
+            # Process in batches
+            batch_size = 10000
+            batch_rows = []
+            
+            for i, j, v in zip(coo.row, coo.col, coo.data):
+                # Skip NaN and zero values
+                if pd.isna(v) or v == 0:
+                    continue
+                
+                row_data = [indices[i]] + ["0"] * len(columns)
+                row_data[j+1] = str(v)
+                batch_rows.append(",".join(row_data))
+                
+                if len(batch_rows) >= batch_size:
+                    f.write("\n".join(batch_rows) + "\n")
+                    batch_rows = []
+            
+            # Write remaining rows
+            if batch_rows:
+                f.write("\n".join(batch_rows) + "\n")
+        
+        # Read the CSV and convert to parquet
+        logger.info(f"Reading temporary CSV file for {filepath}")
+        matrix_df = pd.read_csv(temp_csv)
+        
+        # Save as parquet
+        logger.info(f"Saving to parquet: {filepath}")
+        matrix_df.to_parquet(filepath)
+        
+        # Remove temporary CSV
+        os.remove(temp_csv)
+    
+    # Save matrices
+    raw_output = f"{output_prefix}_raw_depth.parquet"
+    prob_output = f"{output_prefix}_prob_weighted_depth.parquet"
+    norm_output = f"{output_prefix}_normalized_depth.parquet"
+    
+    logger.info("Saving raw depth matrix")
+    save_sparse_matrix(raw_matrix, region_indices, sample_ids, raw_output)
+    logger.info("Saving probability-weighted depth matrix")
+    save_sparse_matrix(prob_matrix, region_indices, sample_ids, prob_output)
+    logger.info("Saving normalized depth matrix")
+    save_sparse_matrix(norm_matrix, region_indices, sample_ids, norm_output)
+    
+    logger.info(f"Raw depth matrix shape: {raw_matrix.shape}")
+    logger.info(f"Probability-weighted depth matrix shape: {prob_matrix.shape}")
+    logger.info(f"Normalized depth matrix shape: {norm_matrix.shape}")
+    
+    # Clean up temporary directory
+    if os.path.exists(temp_dir):
+        for file in os.listdir(temp_dir):
+            os.remove(os.path.join(temp_dir, file))
+        os.rmdir(temp_dir)
+    
+    return meta_df, raw_matrix, prob_matrix, norm_matrix
+
+def generate_depth_matrices(meta_df, bed_df, output_prefix, chunk_size, temp_dir=None):
     """
     Generate depth matrices from all samples.
     
     Args:
         meta_df (pd.DataFrame): DataFrame containing sample metadata.
         bed_df (pd.DataFrame): DataFrame containing DMR regions.
+        output_prefix (str): Prefix for output files.
         chunk_size (int): Number of rows to read at a time.
+        temp_dir (str, optional): Directory for temporary files. Defaults to a subdirectory of output_prefix.
         
     Returns:
-        tuple: A tuple containing three DataFrames (raw_matrix, prob_matrix, norm_matrix).
+        tuple: A tuple containing four sparse matrices (meta_df, raw_matrix, prob_matrix, norm_matrix).
     """
     logger.info("Generating depth matrices")
     
-    # Initialize dictionaries to store matrices for each depth type
-    raw_data = {'sample': [], 'label': []}
-    prob_data = {'sample': [], 'label': []}
-    norm_data = {'sample': [], 'label': []}
+    # Create a temp directory if none provided
+    if temp_dir is None:
+        temp_dir = f"{os.path.dirname(output_prefix)}/temp_{os.path.basename(output_prefix)}"
     
-    # Keep track of all multi-index keys
+    # Create the temp directory if it doesn't exist
+    os.makedirs(temp_dir, exist_ok=True)
+    
+    # Keep track of all region-base pairs across all samples
     all_indices = set()
     
-    # Track sample data for each depth type
-    sample_dfs = []
+    # Process each sample to get index and depth information
+    sample_data = []
     
-    # Process each sample
-    for _, sample_row in tqdm(meta_df.iterrows(), total=len(meta_df), desc="Processing samples"):
-        sample_id, label, multi_index_df = process_sample(sample_row, bed_df, chunk_size)
+    # Process each sample in smaller batches to reduce memory usage
+    sample_batch_size = 5  # Process 5 samples at a time
+    total_batches = (len(meta_df) + sample_batch_size - 1) // sample_batch_size
+    
+    for batch_idx in range(total_batches):
+        start_idx = batch_idx * sample_batch_size
+        end_idx = min((batch_idx + 1) * sample_batch_size, len(meta_df))
         
-        if multi_index_df is not None:
-            # Store sample information
-            raw_data['sample'].append(sample_id)
-            raw_data['label'].append(label)
-            prob_data['sample'].append(sample_id)
-            prob_data['label'].append(label)
-            norm_data['sample'].append(sample_id)
-            norm_data['label'].append(label)
+        logger.info(f"Processing sample batch {batch_idx+1}/{total_batches} (samples {start_idx+1}-{end_idx})")
+        
+        batch_samples = []
+        
+        # Process samples in this batch
+        for i in range(start_idx, end_idx):
+            sample_row = meta_df.iloc[i]
+            sample_id, label, multi_index_df = process_sample(sample_row, bed_df, chunk_size)
             
-            # Extract individual depth DataFrames
-            raw_df = multi_index_df['raw_depth'].unstack()
-            prob_df = multi_index_df['prob_weighted_depth'].unstack()
-            norm_df = multi_index_df['normalized_depth'].unstack()
-            
-            # Save the indices
-            all_indices.update(raw_df.index)
-            
-            # Store the DataFrames for this sample
-            sample_dfs.append((sample_id, raw_df, prob_df, norm_df))
-            
-            # Free memory
-            del multi_index_df
-            gc.collect()
+            if multi_index_df is not None:
+                # Extract individual depth series
+                raw_series = multi_index_df['raw_depth']
+                prob_series = multi_index_df['prob_weighted_depth']
+                norm_series = multi_index_df['normalized_depth']
+                
+                # Update all indices
+                all_indices.update(raw_series.index)
+                
+                # Store the data for this sample
+                batch_samples.append((sample_id, label, raw_series, prob_series, norm_series))
+                
+                # Free memory
+                del multi_index_df
+                gc.collect()
+        
+        # Add batch samples to sample_data
+        sample_data.extend(batch_samples)
+        
+        # Free memory
+        del batch_samples
+        gc.collect()
     
-    # Create empty matrices with all indices
-    all_indices = sorted(list(all_indices))
+    # If no samples were processed successfully, exit
+    if not sample_data:
+        logger.error("No samples were processed successfully. Exiting.")
+        return None, None, None, None
+    
+    # Create mapping from index to position in the matrix
     logger.info(f"Total unique region-base pairs: {len(all_indices)}")
+    indices_map = {idx: i for i, idx in enumerate(sorted(all_indices))}
     
-    # Create the matrices by merging all samples
-    raw_matrix = pd.DataFrame(index=all_indices)
-    prob_matrix = pd.DataFrame(index=all_indices)
-    norm_matrix = pd.DataFrame(index=all_indices)
-    
-    # Add sample columns to the matrices
-    for sample_id, raw_df, prob_df, norm_df in tqdm(sample_dfs, desc="Building matrices"):
-        raw_matrix[sample_id] = raw_df
-        prob_matrix[sample_id] = prob_df
-        norm_matrix[sample_id] = norm_df
-    
-    # Reset index to convert to regular columns
-    raw_matrix = raw_matrix.reset_index()
-    prob_matrix = prob_matrix.reset_index()
-    norm_matrix = norm_matrix.reset_index()
-    
-    # Rename the index column
-    raw_matrix = raw_matrix.rename(columns={'index': 'region_base'})
-    prob_matrix = prob_matrix.rename(columns={'index': 'region_base'})
-    norm_matrix = norm_matrix.rename(columns={'index': 'region_base'})
-    
-    # Add sample and label metadata
-    raw_df_meta = pd.DataFrame({
-        'sample': raw_data['sample'],
-        'label': raw_data['label']
-    })
-    
-    prob_df_meta = pd.DataFrame({
-        'sample': prob_data['sample'],
-        'label': prob_data['label']
-    })
-    
-    norm_df_meta = pd.DataFrame({
-        'sample': norm_data['sample'],
-        'label': norm_data['label']
-    })
-    
-    # Drop columns with NA values
-    raw_matrix = raw_matrix.dropna(axis=1)
-    prob_matrix = prob_matrix.dropna(axis=1)
-    norm_matrix = norm_matrix.dropna(axis=1)
-    
-    logger.info(f"Raw depth matrix shape: {raw_matrix.shape}")
-    logger.info(f"Probability-weighted depth matrix shape: {prob_matrix.shape}")
-    logger.info(f"Normalized depth matrix shape: {norm_matrix.shape}")
-    
-    return raw_df_meta, raw_matrix, prob_df_meta, prob_matrix, norm_df_meta, norm_matrix
+    # Process matrices in batches
+    return process_matrices_in_batches(output_prefix, indices_map, sample_data, temp_dir)
 
 @click.command()
 @click.option('--meta', required=True, type=click.Path(exists=True), help='Path to the meta CSV file with sample information')
 @click.option('--bed', required=True, type=click.Path(exists=True), help='Path to the BED file with DMR regions')
 @click.option('--output', required=True, type=str, help='Prefix for output files')
 @click.option('--chunk-size', default=100000, type=int, help='Number of rows to read at a time from CSV files')
-def main(meta, bed, output, chunk_size):
+@click.option('--temp-dir', type=str, help='Directory for temporary files (default: alongside output)')
+def main(meta, bed, output, chunk_size, temp_dir):
     """
     Generate depth matrices from CSV files produced by stat_depth.py.
     
@@ -351,6 +481,11 @@ def main(meta, bed, output, chunk_size):
     6. Outputs the matrices in parquet format
     """
     try:
+        # Create output directory if it doesn't exist
+        output_dir = os.path.dirname(output)
+        if output_dir and not os.path.exists(output_dir):
+            os.makedirs(output_dir)
+        
         console.print(f"[bold green]Starting depth matrix generation[/bold green]")
         
         # Read input files
@@ -361,37 +496,36 @@ def main(meta, bed, output, chunk_size):
         console.print(f"[green]Found {len(bed_df)} DMR regions in BED file[/green]")
         
         # Generate depth matrices
-        raw_meta, raw_matrix, prob_meta, prob_matrix, norm_meta, norm_matrix = generate_depth_matrices(
-            meta_df, bed_df, chunk_size
+        generate_depth_matrices(
+            meta_df, bed_df, output, chunk_size, temp_dir
         )
         
-        # Prepare output file paths
+        # Output file paths
         raw_output = f"{output}_raw_depth.parquet"
         prob_output = f"{output}_prob_weighted_depth.parquet"
         norm_output = f"{output}_normalized_depth.parquet"
         meta_output = f"{output}_sample_meta.parquet"
         
-        # Save matrices to parquet files
-        console.print("[bold blue]Saving matrices to parquet files...[/bold blue]")
+        # Check if output files were created
+        missing_files = []
+        for file_path in [raw_output, prob_output, norm_output, meta_output]:
+            if not os.path.exists(file_path):
+                missing_files.append(file_path)
         
-        # Save sample metadata
-        raw_meta.to_parquet(meta_output)
-        console.print(f"[blue]Sample metadata saved to: {meta_output}[/blue]")
-        
-        # Save depth matrices
-        raw_matrix.to_parquet(raw_output)
-        prob_matrix.to_parquet(prob_output)
-        norm_matrix.to_parquet(norm_output)
-        
-        console.print(f"[bold green]Raw depth matrix saved to: {raw_output}[/bold green]")
-        console.print(f"[bold green]Probability-weighted depth matrix saved to: {prob_output}[/bold green]")
-        console.print(f"[bold green]Normalized depth matrix saved to: {norm_output}[/bold green]")
-        
-        console.print("[bold green]Depth matrix generation completed successfully![/bold green]")
+        if missing_files:
+            console.print(f"[bold yellow]Warning: The following output files were not created: {', '.join(missing_files)}[/bold yellow]")
+        else:
+            console.print("[bold green]Depth matrix generation completed successfully![/bold green]")
+            console.print(f"[bold green]Output files:[/bold green]")
+            console.print(f"[green]Sample metadata: {meta_output}[/green]")
+            console.print(f"[green]Raw depth matrix: {raw_output}[/green]")
+            console.print(f"[green]Probability-weighted depth matrix: {prob_output}[/green]")
+            console.print(f"[green]Normalized depth matrix: {norm_output}[/green]")
         
     except Exception as e:
         console.print(f"[bold red]Error: {str(e)}[/bold red]")
-        logger.exception("An error occurred during processing")
+        # Print full traceback for better debugging
+        console.print_exception(show_locals=True, width=120)
         sys.exit(1)
 
 if __name__ == '__main__':
