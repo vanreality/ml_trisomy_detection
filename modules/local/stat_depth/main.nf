@@ -3,6 +3,8 @@ process STAT_DEPTH {
     
     input:
     tuple val(meta), path(parquet)
+    path dmr
+    path vcf
     path fasta
     path fai
     path script
@@ -18,6 +20,8 @@ process STAT_DEPTH {
     python3 ${script} \\
         ${args} \\
         --parquet ${parquet} \\
+        --dmr ${dmr} \\
+        --vcf ${vcf} \\
         --fasta ${fasta} \\
         --output ${prefix} \\
         --num-workers ${num_workers}

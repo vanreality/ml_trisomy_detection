@@ -293,31 +293,33 @@ workflow {
     if (run_depth) {
         STAT_DEPTH(
             ch_parquet_samplesheet,
+            file(params.dmr_bed),
+            file(params.vcf),
             file(params.reference),
             ch_fasta_index.map {meta, fasta_index -> fasta_index},
             file("${workflow.projectDir}/bin/stat_depth.py")
         )
 
-        ch_depth_samplesheet = STAT_DEPTH.out.depth_stats
-            .map { meta, depth_stats -> 
-                def csv_path = depth_stats.toAbsolutePath().toString()
-                if (!file(csv_path).exists()) {
-                    error "CSV file does not exist: ${csv_path}"
-                }
-                [meta.id, meta.label, csv_path].join(',')
-            }
-            .collectFile(
-                name: "depth_meta.csv",
-                newLine: true,
-                seed: 'sample,label,csv_file_path'
-            )
-            .map { csv -> [[ id: 'depth_samplesheet' ], csv] }
+        // ch_depth_samplesheet = STAT_DEPTH.out.depth_stats
+        //     .map { meta, depth_stats -> 
+        //         def csv_path = depth_stats.toAbsolutePath().toString()
+        //         if (!file(csv_path).exists()) {
+        //             error "CSV file does not exist: ${csv_path}"
+        //         }
+        //         [meta.id, meta.label, csv_path].join(',')
+        //     }
+        //     .collectFile(
+        //         name: "depth_meta.csv",
+        //         newLine: true,
+        //         seed: 'sample,label,csv_file_path'
+        //     )
+        //     .map { csv -> [[ id: 'depth_samplesheet' ], csv] }
 
-        GENERATE_DEPTH_MATRIX(
-            ch_depth_samplesheet,
-            file(params.dmr_bed),
-            file("${workflow.projectDir}/bin/generate_depth_matrix.py")
-        )
+        // GENERATE_DEPTH_MATRIX(
+        //     ch_depth_samplesheet,
+        //     file(params.dmr_bed),
+        //     file("${workflow.projectDir}/bin/generate_depth_matrix.py")
+        // )
     }
 }
 
