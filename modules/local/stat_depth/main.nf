@@ -10,7 +10,8 @@ process STAT_DEPTH {
     path script
 
     output:
-    tuple val(meta), path("*.csv"), emit: depth_stats
+    tuple val(meta), path("*_depth.parquet"), emit: depth_stats
+    tuple val(meta), path("*_variants.parquet"), emit: variant_stats
 
     script:
     def args = task.ext.args ?: ''
