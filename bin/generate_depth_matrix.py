@@ -140,7 +140,7 @@ def generate_depth_matrices(meta_df: pd.DataFrame, depth_column: str) -> pd.Data
     try:
         # Initialize with first sample
         first_sample = meta_df.iloc[0]
-        meta_df = read_first_sample(first_sample['parquet_file_path'])
+        first_df = read_first_sample(first_sample['parquet_file_path'])
         
         # Dictionary to store depth matrices
         depth_dict = {}
@@ -157,7 +157,7 @@ def generate_depth_matrices(meta_df: pd.DataFrame, depth_column: str) -> pd.Data
             )
             
         depth_df = pd.DataFrame(depth_dict)
-        concated_df = pd.concat([meta_df, depth_df], axis=1)
+        concated_df = pd.concat([first_df, depth_df], axis=1)
         return concated_df
     
     except Exception as e:
