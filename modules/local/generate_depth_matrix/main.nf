@@ -3,7 +3,6 @@ process GENERATE_DEPTH_MATRIX {
     
     input:
     tuple val(meta), path(meta_csv)
-    path bed
     path script
 
     output:
@@ -16,7 +15,6 @@ process GENERATE_DEPTH_MATRIX {
     python3 ${script} \\
         ${args} \\
         --meta ${meta_csv} \\
-        --bed ${bed} \\
         --output ${prefix}
     """
 }
