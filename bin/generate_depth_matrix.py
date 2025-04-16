@@ -12,7 +12,7 @@ import sys
 from typing import List, Dict, Tuple, Optional
 
 # Configure logging with rich
-console = Console()
+console = Console(width=180)
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",

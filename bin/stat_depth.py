@@ -316,6 +316,9 @@ def process_parquet_file(parquet_file, reference_genome, dmr_df, variants_df, ba
             logger.error(f"Missing required columns: {', '.join(missing_columns)}")
             raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
         
+        # Track all DMRs present in the parquet file
+        processed_dmrs = set()
+        
         # Group the dataframe by complete DMR boundaries using the 'chr_dmr', 'start_dmr', 'end_dmr' columns
         dmr_groups = list(df.groupby(['chr_dmr', 'start_dmr', 'end_dmr']))
         batches = []
@@ -323,6 +326,8 @@ def process_parquet_file(parquet_file, reference_genome, dmr_df, variants_df, ba
             batch_groups = dmr_groups[i:i+batch_size]
             batch_df = pd.concat([group for key, group in batch_groups], axis=0)
             batch_dmrs = [key for key, group in batch_groups]  # Each key is a tuple (chr_dmr, start_dmr, end_dmr)
+            # Add DMRs to the set of processed DMRs
+            processed_dmrs.update(batch_dmrs)
             batches.append((batch_df, batch_dmrs))
         total_batches = len(batches)
         
@@ -340,6 +345,37 @@ def process_parquet_file(parquet_file, reference_genome, dmr_df, variants_df, ba
                     pbar.update(1)
                     gc.collect()
         
+        # Check for missing DMRs and initialize them
+        logger.info("Checking for missing DMR regions...")
+        all_dmrs = set(zip(dmr_df['chr'], dmr_df['start'], dmr_df['end']))
+        missing_dmrs = all_dmrs - processed_dmrs
+        
+        if missing_dmrs:
+            logger.info(f"Found {len(missing_dmrs)} missing DMR regions, initializing with depth 0")
+            # Create position entries for missing DMRs
+            missing_dmr_df = dmr_df[dmr_df.apply(lambda row: (row['chr'], row['start'], row['end']) in missing_dmrs, axis=1)]
+            missing_variants_list = []
+            
+            for _, dmr_row in tqdm(missing_dmr_df.iterrows(), desc="Processing missing DMRs", total=len(missing_dmr_df)):
+                dchr, dstart, dend = dmr_row['chr'], dmr_row['start'], dmr_row['end']
+                # Check for variants in this DMR
+                filtered = variants_df[(variants_df['chr'] == dchr) & 
+                                      (variants_df['start'] >= dstart) & 
+                                      (variants_df['start'] < dend)]
+                if not filtered.empty:
+                    missing_variants_list.append(filtered)
+            
+            if missing_variants_list:
+                missing_variants_df = pd.concat(missing_variants_list, axis=0)
+            else:
+                missing_variants_df = pd.DataFrame(columns=variants_df.columns)
+            
+            # Initialize positions for missing DMRs
+            missing_positions = initialize_position_dict(reference_genome, missing_dmr_df, missing_variants_df)
+            
+            # Merge with existing positions
+            merged_position_dict.update(missing_positions)
+            
         # Use merged results from all batches
         position_dict = merged_position_dict
         
@@ -396,6 +432,13 @@ def process_parquet_file(parquet_file, reference_genome, dmr_df, variants_df, ba
         # Convert to DataFrames
         depth_df = pd.DataFrame(depth_rows)
         variant_df = pd.DataFrame(variant_rows)
+        
+        # Sort the dataframes by chromosomal coordinates
+        if not depth_df.empty:
+            depth_df = depth_df.sort_values(by=['chr', 'start', 'end'])
+        
+        if not variant_df.empty:
+            variant_df = variant_df.sort_values(by=['chr', 'start', 'end'])
         
         logger.info(f"Processed {len(depth_df) + len(variant_df)} positions")
         logger.info(f"Found {len(variant_df)} variant positions and {len(depth_df)} non-variant positions")
