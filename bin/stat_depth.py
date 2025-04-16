@@ -18,7 +18,7 @@ import gc
 import pyarrow as pa
 
 # Configure logging with rich
-console = Console(width=280)
+console = Console(width=180)
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
