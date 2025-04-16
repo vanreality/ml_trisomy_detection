@@ -18,7 +18,7 @@ import gc
 import pyarrow as pa
 
 # Configure logging with rich
-console = Console()
+console = Console(width=280)
 logging.basicConfig(
     level=logging.INFO,
     format="%(message)s",
@@ -63,7 +63,7 @@ def read_vcf_file(vcf_file):
         usecols=[0, 1, 3, 4],
         names=['chr', 'start', 'ref', 'alt']
     )
-    vcf['end'] = vcf['start'] + 1
+    vcf['end'] = vcf['start'].astype(int) + 1
     vcf = vcf[vcf['ref'].isin(['A', 'G']) & vcf['alt'].isin(['A', 'G'])]
     return vcf
 
