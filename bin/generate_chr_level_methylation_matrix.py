@@ -425,7 +425,8 @@ def process_samples(meta, regions_df, cpg_sites_df, insert_size_cutoff, min_dept
 
 @click.command()
 @click.option('--meta-file', required=True, help='Path to metadata CSV file')
-@click.option('--dmr', required=False, help='Path to DMR regions BED file (optional)')
+@click.option('--hypo-dmr-bed', required=False, help='Path to hypo DMR regions BED file (optional)')
+@click.option('--hyper-dmr-bed', required=False, help='Path to hyper DMR regions BED file (optional)')
 @click.option('--cpg', required=False, help='Path to CpG sites BED file (optional)')
 @click.option('--insert-size-cutoff', type=int, help='Maximum insert size to include (optional)')
 @click.option('--min-depth', type=int, help='Minimum number of reads required at each CpG position (optional)')
@@ -433,7 +434,7 @@ def process_samples(meta, regions_df, cpg_sites_df, insert_size_cutoff, min_dept
 @click.option('--centralize', is_flag=True, default=False, help='Centralize methylation rates by subtracting the sample average')
 @click.option('--output-prefix', required=True, help='Prefix for output files')
 @click.option('--ncpus', default=1, type=int, help='Number of CPU cores to use')
-def main(meta_file, dmr, cpg, insert_size_cutoff, min_depth, prob_cutoff, centralize, output_prefix, ncpus):
+def main(meta_file, hypo_dmr_bed, hyper_dmr_bed, cpg, insert_size_cutoff, min_depth, prob_cutoff, centralize, output_prefix, ncpus):
     """Generate chromosome-level methylation matrix from probability files.
     
     This script calculates methylation rates at the chromosome level based on
@@ -454,10 +455,14 @@ def main(meta_file, dmr, cpg, insert_size_cutoff, min_depth, prob_cutoff, centra
             sys.exit(1)
         
         # Read DMR file if provided
-        regions_df = None
-        if dmr:
-            console.print(f"Reading DMR regions from {dmr}...")
-            regions_df = read_bed_file(dmr)
+        hypo_regions_df = None
+        hyper_regions_df = None
+        if hypo_dmr_bed:
+            console.print(f"Reading hypo DMR regions from {hypo_dmr_bed}...")
+            hypo_regions_df = read_bed_file(hypo_dmr_bed)
+        if hyper_dmr_bed:
+            console.print(f"Reading hyper DMR regions from {hyper_dmr_bed}...")
+            hyper_regions_df = read_bed_file(hyper_dmr_bed)
         
         # Read CpG sites file if provided
         cpg_sites_df = None
@@ -484,7 +489,8 @@ def main(meta_file, dmr, cpg, insert_size_cutoff, min_depth, prob_cutoff, centra
         if centralize:
             console.print("[green]Centralizing methylation rates by subtracting sample averages.[/green]")
         
-        process_samples(meta, regions_df, cpg_sites_df, insert_size_cutoff, min_depth, prob_cutoff, centralize, output_prefix, ncpus)
+        process_samples(meta, hypo_regions_df, cpg_sites_df, insert_size_cutoff, min_depth, prob_cutoff, centralize, f'{output_prefix}_hypo', ncpus)
+        process_samples(meta, hyper_regions_df, cpg_sites_df, insert_size_cutoff, min_depth, prob_cutoff, centralize, f'{output_prefix}_hyper', ncpus)
         
     except Exception as e:
         console.print(f"[red]Error: {str(e)}[/red]")

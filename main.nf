@@ -19,6 +19,7 @@ include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_RAW } from 
 include { GENERATE_METHYLATION_MATRIX as GENERATE_METHYLATION_MATRIX_PROB_WEIGHTED } from './modules/local/generate_methylation_matrix/main'
 include { STAT_DEPTH } from './modules/local/stat_depth/main'
 include { GENERATE_DEPTH_MATRIX } from './modules/local/generate_depth_matrix/main'
+include { GENERATE_CHR_LEVEL_METHYLATION_MATRIX } from './modules/local/generate_chr_level_methylation_matrix/main'
 
 // Add aliases for DMR heatmap plotting
 include { PLOT_HEATMAP as PLOT_HEATMAP_TARGET_CPGS } from './modules/local/plot_heatmap/main'
@@ -34,6 +35,7 @@ workflow {
     def run_target = false
     def run_prob_weighted = false
     def run_depth = false
+    def run_chr_level = false
 
     if (!params.mode) {
         // Default: run all modes if not specified
@@ -41,6 +43,7 @@ workflow {
         run_target = params.threshold != null
         run_prob_weighted = true
         run_depth = true
+        run_chr_level = true
     } else {
         // Parse the mode parameter
         def modes = params.mode.split('\\|')
@@ -48,6 +51,7 @@ workflow {
         run_target = modes.contains('target') && params.threshold != null
         run_prob_weighted = modes.contains('prob_weighted')
         run_depth = modes.contains('depth')
+        run_chr_level = modes.contains('chr_level')
     }
     
     // 1. Input processing and common setup
@@ -273,6 +277,16 @@ workflow {
         
         // Generate methylation matrices for prob-weighted analysis
         GENERATE_METHYLATION_MATRIX_PROB_WEIGHTED(ch_prob_weighted_meta, file(params.dmr_bed))
+
+        if (run_chr_level && params.hypo_dmr_bed != null && params.hyper_dmr_bed != null) {
+            // Generate methylation matrix for chr level analysis
+            GENERATE_CHR_LEVEL_METHYLATION_MATRIX(
+                ch_prob_weighted_meta, 
+                file(params.hypo_dmr_bed), 
+                file(params.hyper_dmr_bed),
+                file("${workflow.projectDir}/bin/generate_chr_level_methylation_matrix.py")
+            )
+        }
         
         // Generate heatmaps for prob-weighted analysis
         PLOT_HEATMAP_PROB_WEIGHTED_CPGS(

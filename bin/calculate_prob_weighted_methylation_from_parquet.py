@@ -59,12 +59,12 @@ def local_realign(seq, ref_seq):
     seq_for_alignment = seq.replace('M', 'C')
     
     # Configure aligner for local alignment
-    aligner = PairwiseAligner()
+    aligner = PairwiseAligner(scoring='blastn')
     aligner.mode = 'local'
-    aligner.match_score = 2
-    aligner.mismatch_score = -1
-    aligner.open_gap_score = -2
-    aligner.extend_gap_score = -0.5
+    # aligner.match_score = 2
+    # aligner.mismatch_score = -1
+    # aligner.open_gap_score = -2
+    # aligner.extend_gap_score = -0.5
     
     # Perform alignment
     alignments = aligner.align(ref_seq, seq_for_alignment)
@@ -75,7 +75,7 @@ def local_realign(seq, ref_seq):
     
     return alignments[0]
 
-def identify_cpg_sites(reference_seq, alignment, ref_start_pos, original_seq):
+def identify_cpg_sites(reference_seq, alignment, ref_start_pos, original_query):
     """
     Identify CpG sites in the alignment and determine methylation status.
     
@@ -91,47 +91,40 @@ def identify_cpg_sites(reference_seq, alignment, ref_start_pos, original_seq):
     cpg_sites = []
     
     # Extract aligned sequences with gaps
-    aligned_ref = alignment.target
-    aligned_seq = alignment.query
-    
+    aligned_ref = str(alignment[0])
+    aligned_query = str(alignment[1])
+    aligned_ref_pos = alignment.coordinates[0][0]
+    aligned_query_pos = alignment.coordinates[1][0]
+
+    # Recover the M bases in the query sequence
+    recovered_query = ''
+    for q_base in aligned_query:
+        if q_base != '-':
+            recovered_query += original_query[aligned_query_pos]
+            aligned_query_pos+=1
+        else:
+            recovered_query += '-'
+    aligned_query = recovered_query
+
     # Find all CpG sites in the reference
-    for i in range(len(reference_seq) - 1):
-        if reference_seq[i:i+2] == "CG":
-            # CpG site in reference at position ref_start_pos + i
-            ref_pos = ref_start_pos + i
-            
-            # Find where this position maps in the alignment
-            # Calculate offset in alignment based on reference starting position in alignment
-            ref_idx = i
-            align_idx = 0
-            ref_count = 0
-            
-            # Find the corresponding position in the alignment
-            for j, char in enumerate(aligned_ref):
-                if ref_count == ref_idx:
-                    align_idx = j
-                    break
-                if char != '-':
-                    ref_count += 1
-            
-            # Check if the position is aligned (not at a gap)
-            if align_idx < len(aligned_seq) and aligned_ref[align_idx] != '-' and aligned_seq[align_idx] != '-':
-                # Map back to the original sequence
-                seq_idx = 0
-                for j, char in enumerate(aligned_seq[:align_idx]):
-                    if char != '-':
-                        seq_idx += 1
+    idx_to_skip = 0
+    for i in range(len(aligned_ref) - 1):
+        if aligned_ref[i] == '-':
+            idx_to_skip += 1
+        if aligned_ref[i:i+2] == "CG":
+            # CpG site in reference at position ref_pos
+            ref_pos = ref_start_pos + aligned_ref_pos + i - idx_to_skip
+
+            # Check if the cytosine is methylated (represented as 'M')
+            methylation_status = 0
+            if aligned_query[i] == 'M':
+                methylation_status = 1
                 
-                # Check if the cytosine is methylated (represented as 'M')
-                methylation_status = 0
-                if seq_idx < len(original_seq) and original_seq[seq_idx] == 'M':
-                    methylation_status = 1
-                
-                cpg_sites.append({
-                    'cpg_start': ref_pos,
-                    'cpg_end': ref_pos + 2,
-                    'status': methylation_status
-                })
+            cpg_sites.append({
+                'cpg_start': ref_pos,
+                'cpg_end': ref_pos + 2,
+                'status': methylation_status
+            })
     
     return cpg_sites
 
@@ -176,7 +169,7 @@ def process_batch(batch, reference_genome, n_bp_downstream=20, n_bp_upstream=20)
         if alignment:
             # Identify CpG sites and methylation status
             cpg_sites = identify_cpg_sites(
-                ref_region, alignment, start_pos, sequence
+                ref_region, alignment, start_pos - n_bp_upstream, sequence
             )
             
             # Add data to results
