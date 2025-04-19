@@ -8,7 +8,7 @@ process GENERATE_CHR_LEVEL_METHYLATION_MATRIX {
     path script
 
     output:
-    tuple val(meta), path("*.parquet"), emit: chr_level_matrices
+    tuple val(meta), path("*.tsv"), emit: chr_level_matrices
 
     script:
     def args = task.ext.args ?: ''
