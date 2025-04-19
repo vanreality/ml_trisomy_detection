@@ -16,9 +16,11 @@ process GENERATE_CHR_LEVEL_METHYLATION_MATRIX {
     """
     python3 ${script} \\
         ${args} \\
-        --meta ${meta_csv} \\
+        --meta-file ${meta_csv} \\
         --hypo-dmr-bed ${hypo_dmr_bed} \\
         --hyper-dmr-bed ${hyper_dmr_bed} \\
-        --output ${prefix}
+        --centralize \\
+        --ncpus ${task.cpus} \\
+        --output-prefix ${prefix}
     """
 }
