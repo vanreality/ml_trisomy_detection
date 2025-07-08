@@ -127,6 +127,12 @@ def get_methylation_status(bam, txt, cpg_site_df, ncpus=None):
     if not txt_df['chr'].astype(str).str.contains('chr').all():
         txt_df['chr'] = 'chr' + txt_df['chr'].astype(str)
     
+    # Check for sequence column name and standardize to 'text'
+    if 'seq' in txt_df.columns and 'text' not in txt_df.columns:
+        txt_df['text'] = txt_df['seq']
+    elif 'text' not in txt_df.columns and 'seq' not in txt_df.columns:
+        raise ValueError("Neither 'text' nor 'seq' column found in the txt file")
+    
     # Create indexed version of txt_df
     txt_df_indexed = create_txt_index(txt_df)
     
