@@ -128,13 +128,14 @@ def identify_cpg_sites(reference_seq, alignment, ref_start_pos, original_query):
     
     return cpg_sites
 
-def process_batch(batch, reference_genome, n_bp_downstream=20, n_bp_upstream=20):
+def process_batch(batch, reference_genome, seq_column_name, n_bp_downstream=20, n_bp_upstream=20):
     """
     Process a batch of sequences from the parquet file.
     
     Args:
         batch: Pandas DataFrame containing a batch of sequence records
         reference_genome: Dictionary of chromosome sequences
+        seq_column_name: Name of the column containing sequences ('seq' or 'text')
         n_bp_downstream: Number of base pairs downstream to include in the reference extract
         n_bp_upstream: Number of base pairs upstream to include in the reference extract
         
@@ -147,7 +148,7 @@ def process_batch(batch, reference_genome, n_bp_downstream=20, n_bp_upstream=20)
         chr_name = row['chr']
         start_pos = row['start']
         end_pos = row['end']
-        sequence = row['seq']
+        sequence = row[seq_column_name]
         prob = row['prob_class_1']
         name = row['name']
         insert_size = row['insert_size']
@@ -213,8 +214,20 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
     table = pq.read_table(parquet_file)
     df = table.to_pandas()
     
+    # Automatically detect sequence column name
+    seq_column_name = None
+    if 'seq' in df.columns:
+        seq_column_name = 'seq'
+    elif 'text' in df.columns:
+        seq_column_name = 'text'
+    else:
+        logger.error("No sequence column found. Expected either 'seq' or 'text' column.")
+        raise ValueError("No sequence column found. Expected either 'seq' or 'text' column.")
+    
+    logger.info(f"Using sequence column: {seq_column_name}")
+    
     # Verify required columns
-    required_columns = ['chr', 'start', 'end', 'seq', 'prob_class_1', 'chr_dmr', 'start_dmr', 'end_dmr']
+    required_columns = ['chr', 'start', 'end', seq_column_name, 'prob_class_1', 'chr_dmr', 'start_dmr', 'end_dmr']
     missing_columns = [col for col in required_columns if col not in df.columns]
     if missing_columns:
         logger.error(f"Missing required columns: {', '.join(missing_columns)}")
@@ -225,7 +238,7 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
     total_batches = (len(df) + batch_size - 1) // batch_size
     
     with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        batch_processor = partial(process_batch, reference_genome=reference_genome, n_bp_downstream=n_bp_downstream, n_bp_upstream=n_bp_upstream)
+        batch_processor = partial(process_batch, reference_genome=reference_genome, seq_column_name=seq_column_name, n_bp_downstream=n_bp_downstream, n_bp_upstream=n_bp_upstream)
         
         for i in range(total_batches):
             start_idx = i * batch_size
