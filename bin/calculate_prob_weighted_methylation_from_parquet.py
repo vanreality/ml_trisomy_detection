@@ -240,7 +240,7 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=10000, num_w
     
     # Use polars to efficiently scan file metadata
     df_lazy = pl.scan_parquet(parquet_file)
-    columns = df_lazy.columns
+    columns = df_lazy.collect_schema().names()
     
     # Automatically detect sequence column name
     seq_column_name = None
