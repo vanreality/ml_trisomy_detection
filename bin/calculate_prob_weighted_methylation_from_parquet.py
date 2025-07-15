@@ -1,15 +1,18 @@
 import pandas as pd
+import polars as pl
 import numpy as np
 import click
 from Bio import SeqIO
 from Bio.Align import PairwiseAligner
-from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, as_completed
 import multiprocessing
 from functools import partial
 import sys
 import os
 import logging
-import pyarrow.parquet as pq
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TaskProgressColumn, TimeElapsedColumn
+from rich.console import Console
+import gc
 
 # Configure logging
 logging.basicConfig(
@@ -130,7 +133,7 @@ def identify_cpg_sites(reference_seq, alignment, ref_start_pos, original_query):
 
 def process_batch(batch, reference_genome, seq_column_name, n_bp_downstream=20, n_bp_upstream=20):
     """
-    Process a batch of sequences from the parquet file.
+    Process a batch of sequences from the parquet file with optimized memory usage.
     
     Args:
         batch: Pandas DataFrame containing a batch of sequence records
@@ -144,18 +147,35 @@ def process_batch(batch, reference_genome, seq_column_name, n_bp_downstream=20, 
     """
     results = []
     
-    for _, row in batch.iterrows():
-        chr_name = row['chr']
-        start_pos = row['start']
-        end_pos = row['end']
-        sequence = row[seq_column_name]
-        prob = row['prob_class_1']
-        name = row['name']
-        insert_size = row['insert_size']
-        chr_dmr = row['chr_dmr']
-        start_dmr = row['start_dmr']
-        end_dmr = row['end_dmr']
+    # Convert to numpy arrays for faster iteration
+    chr_names = batch['chr'].values
+    start_positions = batch['start'].values
+    end_positions = batch['end'].values
+    sequences = batch[seq_column_name].values
+    probs = batch['prob_class_1'].values
+    names = batch['name'].values if 'name' in batch.columns else [None] * len(batch)
+    insert_sizes = batch['insert_size'].values if 'insert_size' in batch.columns else [None] * len(batch)
+    chr_dmrs = batch['chr_dmr'].values
+    start_dmrs = batch['start_dmr'].values
+    end_dmrs = batch['end_dmr'].values
+    
+    # Process each row
+    for i in range(len(batch)):
+        chr_name = chr_names[i]
+        start_pos = start_positions[i]
+        end_pos = end_positions[i]
+        sequence = sequences[i]
+        prob = probs[i]
+        name = names[i]
+        insert_size = insert_sizes[i]
+        chr_dmr = chr_dmrs[i]
+        start_dmr = start_dmrs[i]
+        end_dmr = end_dmrs[i]
         
+        # Skip if sequence is None or empty
+        if not sequence or pd.isna(sequence):
+            continue
+            
         # Extract reference region with extra bases upstream and downstream
         ref_region = extract_region_from_reference(
             reference_genome, chr_name, start_pos - n_bp_upstream, end_pos + n_bp_downstream
@@ -173,7 +193,7 @@ def process_batch(batch, reference_genome, seq_column_name, n_bp_downstream=20, 
                 ref_region, alignment, start_pos - n_bp_upstream, sequence
             )
             
-            # Add data to results
+            # Add data to results (pre-allocate if possible for better performance)
             for cpg in cpg_sites:
                 results.append({
                     'chr': chr_name,
@@ -188,11 +208,15 @@ def process_batch(batch, reference_genome, seq_column_name, n_bp_downstream=20, 
                     'end_dmr': end_dmr
                 })
     
+    # Clear batch from memory in this process
+    del batch
+    gc.collect()
+    
     return results
 
-def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_workers=None, n_bp_downstream=20, n_bp_upstream=20):
+def process_parquet_file(parquet_file, reference_genome, batch_size=10000, num_workers=None, n_bp_downstream=20, n_bp_upstream=20):
     """
-    Process sequences from a parquet file to determine CpG methylation status.
+    Process sequences from a parquet file to determine CpG methylation status using streaming approach.
     
     Args:
         parquet_file: Path to the parquet file
@@ -206,51 +230,114 @@ def process_parquet_file(parquet_file, reference_genome, batch_size=1000, num_wo
         Pandas DataFrame with CpG methylation data
     """
     if num_workers is None:
-        num_workers = multiprocessing.cpu_count()
+        num_workers = min(multiprocessing.cpu_count(), 8)  # Limit to avoid excessive memory usage
     
-    logger.info(f"Processing parquet file: {parquet_file} with {num_workers} workers")
+    console = Console()
+    console.print(f"[green]Processing parquet file: {parquet_file} with {num_workers} workers[/green]")
     
-    # Read parquet file
-    table = pq.read_table(parquet_file)
-    df = table.to_pandas()
+    # First, scan the file to get total rows and detect sequence column
+    console.print("[cyan]Scanning file to detect columns and count rows...[/cyan]")
+    
+    # Use polars to efficiently scan file metadata
+    df_lazy = pl.scan_parquet(parquet_file)
+    columns = df_lazy.columns
     
     # Automatically detect sequence column name
     seq_column_name = None
-    if 'seq' in df.columns:
+    if 'seq' in columns:
         seq_column_name = 'seq'
-    elif 'text' in df.columns:
+    elif 'text' in columns:
         seq_column_name = 'text'
     else:
         logger.error("No sequence column found. Expected either 'seq' or 'text' column.")
         raise ValueError("No sequence column found. Expected either 'seq' or 'text' column.")
     
-    logger.info(f"Using sequence column: {seq_column_name}")
+    console.print(f"[green]Using sequence column: {seq_column_name}[/green]")
     
     # Verify required columns
     required_columns = ['chr', 'start', 'end', seq_column_name, 'prob_class_1', 'chr_dmr', 'start_dmr', 'end_dmr']
-    missing_columns = [col for col in required_columns if col not in df.columns]
+    missing_columns = [col for col in required_columns if col not in columns]
     if missing_columns:
         logger.error(f"Missing required columns: {', '.join(missing_columns)}")
         raise ValueError(f"Missing required columns: {', '.join(missing_columns)}")
     
-    # Process data in batches
+    # Get total row count efficiently
+    total_rows = df_lazy.select(pl.len()).collect().item()
+    total_batches = (total_rows + batch_size - 1) // batch_size
+    
+    console.print(f"[cyan]Total rows: {total_rows:,}, Processing in {total_batches} batches of {batch_size:,} records[/cyan]")
+    
+    # Process data in streaming batches with progress tracking
     all_results = []
-    total_batches = (len(df) + batch_size - 1) // batch_size
     
-    with ProcessPoolExecutor(max_workers=num_workers) as executor:
-        batch_processor = partial(process_batch, reference_genome=reference_genome, seq_column_name=seq_column_name, n_bp_downstream=n_bp_downstream, n_bp_upstream=n_bp_upstream)
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        TimeElapsedColumn(),
+        console=console
+    ) as progress:
         
-        for i in range(total_batches):
-            start_idx = i * batch_size
-            end_idx = min((i + 1) * batch_size, len(df))
-            batch = df.iloc[start_idx:end_idx]
+        task = progress.add_task("Processing batches", total=total_batches)
+        
+        with ProcessPoolExecutor(max_workers=num_workers) as executor:
+            batch_processor = partial(
+                process_batch, 
+                reference_genome=reference_genome, 
+                seq_column_name=seq_column_name, 
+                n_bp_downstream=n_bp_downstream, 
+                n_bp_upstream=n_bp_upstream
+            )
             
-            logger.info(f"Processing batch {i+1}/{total_batches} with {len(batch)} records")
-            batch_results = executor.submit(batch_processor, batch)
-            all_results.extend(batch_results.result())
+            # Submit all batches as futures
+            future_to_batch = {}
+            
+            for i in range(total_batches):
+                offset = i * batch_size
+                
+                # Read batch using polars streaming
+                batch_df = (
+                    df_lazy
+                    .slice(offset, batch_size)
+                    .select(required_columns)
+                    .collect()
+                    .to_pandas()
+                )
+                
+                # Only submit if batch is not empty
+                if len(batch_df) > 0:
+                    future = executor.submit(batch_processor, batch_df)
+                    future_to_batch[future] = i + 1
+                    
+                    # Clear batch from memory
+                    del batch_df
+                    gc.collect()
+            
+            # Collect results as they complete
+            for future in as_completed(future_to_batch):
+                batch_num = future_to_batch[future]
+                try:
+                    batch_results = future.result()
+                    all_results.extend(batch_results)
+                    progress.advance(task)
+                    
+                    # Periodic garbage collection to manage memory
+                    if batch_num % 10 == 0:
+                        gc.collect()
+                        
+                except Exception as exc:
+                    logger.error(f'Batch {batch_num} generated an exception: {exc}')
+                    raise exc
     
-    # Convert results to DataFrame
-    results_df = pd.DataFrame(all_results)
+    console.print(f"[green]Processed {len(all_results):,} CpG sites[/green]")
+    
+    # Convert results to DataFrame efficiently
+    if all_results:
+        results_df = pd.DataFrame(all_results)
+    else:
+        # Return empty DataFrame with correct columns if no results
+        results_df = pd.DataFrame(columns=['chr', 'start', 'end', 'status', 'prob_class_1', 'name', 'insert_size', 'chr_dmr', 'start_dmr', 'end_dmr'])
     
     return results_df
 
@@ -265,15 +352,24 @@ def calculate_weighted_methylation(results_df):
     Returns:
         DataFrame with weighted methylation rates
     """
-    logger.info("Calculating weighted methylation rates")
+    console = Console()
+    console.print("[cyan]Calculating weighted methylation rates...[/cyan]")
+    
+    if len(results_df) == 0:
+        console.print("[yellow]No CpG sites found to calculate methylation rates[/yellow]")
+        return pd.DataFrame(columns=['chr', 'start', 'end', 'rate'])
     
     # Group by CpG site location
     grouped = results_df.groupby(['chr', 'start', 'end'])
+    
+    console.print(f"[cyan]Found {len(grouped)} unique CpG sites[/cyan]")
     
     # Calculate weighted methylation rate
     weighted_meth = grouped.apply(
         lambda x: (np.sum(x['status'] * x['prob_class_1']) / np.sum(x['prob_class_1'])) * 100
     ).reset_index(name='rate')
+    
+    console.print(f"[green]Calculated methylation rates for {len(weighted_meth)} CpG sites[/green]")
     
     return weighted_meth
 
@@ -281,18 +377,30 @@ def calculate_weighted_methylation(results_df):
 @click.option('--parquet', required=True, type=click.Path(exists=True), help='Path to the parquet file')
 @click.option('--fasta', required=True, type=click.Path(exists=True), help='Path to the reference genome FASTA file')
 @click.option('--output', required=True, type=str, help='Prefix for output files')
-@click.option('--batch-size', default=100000, type=int, help='Number of records to process in each batch')
+@click.option('--batch-size', default=10000, type=int, help='Number of records to process in each batch')
 @click.option('--num-workers', default=None, type=int, help='Number of worker processes for parallel processing')
 @click.option('--n-bp-downstream', default=20, type=int, help='Number of base pairs downstream to include in the reference extract')
 @click.option('--n-bp-upstream', default=0, type=int, help='Number of base pairs upstream to include in the reference extract')
 def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream, n_bp_upstream):
     """
-    Process sequencing data to determine CpG methylation status.
+    Process sequencing data to determine CpG methylation status with optimized performance.
     """
+    console = Console()
+    
+    console.print("[bold green]Starting CpG methylation analysis[/bold green]")
+    console.print(f"Input file: {parquet}")
+    console.print(f"Reference genome: {fasta}")
+    console.print(f"Output prefix: {output}")
+    console.print(f"Batch size: {batch_size:,}")
+    console.print(f"Workers: {num_workers or 'auto'}")
+    
     # Read reference genome
+    console.print("\n[cyan]Reading reference genome...[/cyan]")
     reference_genome = read_reference_genome(fasta)
+    console.print(f"[green]Loaded {len(reference_genome)} chromosomes[/green]")
     
     # Process parquet file
+    console.print("\n[cyan]Processing parquet file...[/cyan]")
     results_df = process_parquet_file(
         parquet, reference_genome, 
         batch_size=batch_size, 
@@ -302,23 +410,31 @@ def main(parquet, fasta, output, batch_size, num_workers, n_bp_downstream, n_bp_
     )
     
     # Write detailed results to CSV
+    console.print("\n[cyan]Writing detailed results...[/cyan]")
     csv_output = f"{output}_cpg_prob.csv"
     results_df.to_csv(csv_output, index=False)
-    logger.info(f"Detailed results written to: {csv_output}")
+    console.print(f"[green]Detailed results written to: {csv_output}[/green]")
     
     # Calculate weighted methylation rates
+    console.print("\n[cyan]Calculating weighted methylation rates...[/cyan]")
     weighted_meth_df = calculate_weighted_methylation(results_df)
     
     # Write weighted methylation rates to bedGraph file
+    console.print("[cyan]Writing bedGraph output...[/cyan]")
     bedgraph_output = f"{output}_CpG.bedGraph"
-    weighted_meth_df.to_csv(
-        bedgraph_output, 
-        columns=['chr', 'start', 'end', 'rate'],
-        sep='\t',
-        header=False,
-        index=False
-    )
-    logger.info(f"Weighted methylation rates written to: {bedgraph_output}")
+    if len(weighted_meth_df) > 0:
+        weighted_meth_df.to_csv(
+            bedgraph_output, 
+            columns=['chr', 'start', 'end', 'rate'],
+            sep='\t',
+            header=False,
+            index=False
+        )
+        console.print(f"[green]Weighted methylation rates written to: {bedgraph_output}[/green]")
+    else:
+        console.print(f"[yellow]No methylation data to write to bedGraph file[/yellow]")
+    
+    console.print("\n[bold green]Analysis completed successfully![/bold green]")
 
 if __name__ == '__main__':
     main()
